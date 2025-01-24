@@ -1,0 +1,313 @@
+---
+title: "Non-linear Chaotic Dynamical Systems"
+author: "Par Pishrobat"
+date: "`r Sys.Date()`"
+format: 
+  pdf:
+    documentclass: article   # PDF document class (article, report, book)
+    toc: true                # Table of contents for PDF
+    number-sections: true    # Number sections
+    toc-depth: 2        # Levels of headers to include in the TOC
+    code-fold: true     # Code folding (collapsible code blocks)
+    theme: cosmo        # Apply a theme (see common themes below)
+  # docx:                   # For Word output
+  #  toc: true
+  #  reference-doc: "template.docx" # Use a custom Word template
+editor: visual
+#bibliography: references.bib   # Bibliography file
+#csl: apa.csl              # Citation style
+output-file: code_output   # Specify output filename
+---
+
+```{r include: false}
+library(synlik)
+invisible(lapply(list.files("R/", pattern = "\\.R$", full.names = T), source))
+
+```
+
+```{r}
+# Ground truth parameters (relatively periodic behavior)
+true_params <- c(
+    alpha = 2,
+    sigma = 0.05,
+    y = 1
+)
+
+rulkov_sl <- synlik(
+    simulator = simulate_rulkov, # Simulation function
+    summaries = compute_stats, # Summary statistics function 
+    param = true_params, # Initial parameters
+    extraArgs = list( # Additional simulstion arguments
+        "nObs"     = 50,
+        "nBurn"    = 50,
+        # "initVal"  = c(1,1),
+        "randInit" = TRUE
+    )
+)
+
+```
+
+```{r}
+rulkov_sl@data <- simulate(rulkov_sl, nsim = 1, seed = 123)
+```
+
+```{r}
+rulkov_sl@plotFun <- function(input, ...) {
+    plot(drop(input), type = "l", ylab = "Pop", xlab = "Time", ...)
+}
+plot(rulkov_sl)
+```
+
+```{r}
+tmp <- simulate(rulkov_sl, nsim = 10)
+dim(tmp)
+```
+
+```{r}
+rulkov_sl@extraArgs$obsData <- rulkov_sl@data
+```
+
+```{r}
+tmp <- simulate(rulkov_sl, nsim = 2, stats = TRUE)
+tmp
+```
+
+```{r}
+checkNorm(rulkov_sl)
+```
+
+```{r}
+slik(rulkov_sl, param = true_params, nsim = 1e3)
+```
+
+```{r eval=FALSE}
+slice(
+    object = rulkov_sl,
+    ranges = list(
+        "alpha" = seq(1, 10, by = 0.1),
+        "sigma" = seq(0.1, 1.1, by = 0.01),
+        "y" = seq(0.5, 1.5, by = 0.01)
+    ),
+    param = true_params,
+    nsim = 1000
+)
+```
+
+```{r eval=FALSE}
+slice(
+    object = rulkov_sl,
+    ranges = list(
+        "alpha" = seq(1, 10, by = 0.1),
+        "sigma" = seq(0.1, 1.1, by = 0.01)
+    ),
+    pairs = TRUE,
+    param = true_params,
+    nsim = 1000,
+    multicore = TRUE,
+    ncores = 6
+)
+```
+
+```{r}
+rulkov_smcmc <- synMCMC(rulkov_sl,
+    initPar = c("alpha" = 1, "sigma" = 1, "y" = 1),
+    niter = 51000,
+    burn = 1000,
+    propCov = diag(c(rep(0.1, 2), 0)),
+    nsim = 100,
+    priorFun = function(input, ...) mean(dunif(input)),
+    targetRate = 0.15,
+    multicore = FALSE
+)
+
+```
+
+```{r}
+data(rulkov_smcmc)
+tmpTrans <- rep("exp", 6)
+names(tmpTrans) <- names(rulkov_smcmc@param)
+plot(rulkov_smcmc@data, trans = tmpTrans)
+```
+
+### Particle Marginal Metropolis–Hastings Sampler for Fast Stochastic Rulkov Map
+
+We adapt the algorithm to fit the Fast Stochastic Rulkov Map model, where:
+
+-   $\theta$ represents the parameters $(\alpha, y, \sigma, \eta)$.
+
+-   $x_t$ represents the hidden (latent) state governed by the fast subsystem.
+
+-   $z_t$ represents the observed data (noisy measurement of $x_t$).
+
+The algorithm proceeds as follows:
+
+### Algorithm:
+
+#### Step 1: Initialization
+
+-   Set iteration $i = 0$.
+-   Choose an initial estimate of parameters $\theta_0 = (\alpha_0, y_0, \sigma_0, \eta_0)$.
+-   Use a particle filter to estimate the likelihood $p(z^0_{1:T} | \theta_0)$.
+
+#### Iteration $i \geq 1$:
+
+1.  **Propose New Parameters**:\
+    Sample a new set of parameters $\theta^* = (\alpha^*, y^*, \sigma^*, \eta^*)$ from the proposal distribution $K(\theta^* | \theta_{i-1})$.
+
+2.  **Estimate Likelihood**:\
+    Using a particle filter, estimate the likelihood $\hat{p}(z^0_{1:T} | \theta^*)$.
+
+3.  **Acceptance Step**:\
+    With probability: $\min \left\{ 1, \frac{\hat{p}(z^0_{1:T} | \theta^*) p(\theta^*) K(\theta_{i-1} | \theta^*)}{\hat{p}(z^0_{1:T} | \theta_{i-1}) p(\theta_{i-1}) K(\theta^* | \theta_{i-1})} \right\}$, set $\theta_i = \theta^*$. Otherwise, set $\theta_i = \theta_{i-1}$.
+
+### 
+
+```{r}
+# Load necessary libraries
+library(pomp)
+
+# Define the state transition model (process model)
+rulkov_step <- Csnippet("
+  double xi = rnorm(0, sigma);
+  x = alpha / (1 + x * x) + y + xi;
+")
+
+# Define the measurement model
+rulkov_rmeasure <- Csnippet("
+  z = rnorm(x, eta);
+")
+
+# Define the density of the measurement process
+rulkov_dmeasure <- Csnippet("
+  lik = dnorm(z, x, eta, give_log);
+")
+
+# Define the parameter initialization function
+rulkov_init <- Csnippet("
+  x = rnorm(0, 1);  // Initialize latent state
+")
+
+
+```
+
+```{r}
+
+
+# Simulate data based on known parameters
+set.seed(123)
+true_params <- c(alpha = 4.0, logeta = log(0.1), logsigma = log(0.5))
+
+rulkov_sim <-  pomp::pomp(
+    data       = data.frame(time = 1:100, obs = NA),
+    times      = "time",
+    t0         = 0,
+    rinit      = pmcmc_init,
+    rprocess   = discrete_time(pmcmc_step, delta.t = 1),
+    rmeasure   = pmcmc_rmeasure,
+    dmeasure   = pmcmc_dmeasure,
+    dprior     = pmcmc_dprior,
+    params     = true_params,
+    statenames = c("x"),
+    paramnames = c("alpha", "logeta", "logsigma")
+  )
+
+# Simulate observations
+rulkov_sim <- simulate(rulkov_sim, nsim = 1, userdata = list(as.data.frame = TRUE))
+
+pf_current <- pfilter(rulkov_sim, params = params, Np = 100)
+loglik_current <- logLik(pf_current)
+```
+
+```{r}
+library(ggplot2)
+# Plot simulated data
+ggplot(as.data.frame(rulkov_sim), aes(x = time, y = z)) +
+    geom_line() +
+    labs(title = "Simulated Observations")
+
+```
+
+```{r}
+# Particle filter for likelihood estimation
+rulkov_pfilter <- function(params, Np = 1000) {
+    pfilter(
+        rulkov_sim,
+        params = params,
+        Np = Np
+    )
+}
+
+# Define the Metropolis-Hastings transition kernel with positivity constraints
+mh_transition_kernel <- function(params) {
+    params_new <- params
+    params_new["alpha"] <- rnorm(1, mean = params["alpha"], sd = 0.1)
+    params_new["y"] <- rnorm(1, mean = params["y"], sd = 0.1)
+
+    # Ensure sigma and eta are positive by sampling from a log-normal distribution
+    params_new["sigma"] <- exp(rnorm(1, mean = log(params["sigma"]), sd = 0.05))
+    params_new["eta"] <- exp(rnorm(1, mean = log(params["eta"]), sd = 0.02))
+
+    params_new
+}
+
+# Also ensure that your initial parameter guesses are valid:
+params_current <- c(alpha = 3.5, logeta = log(0.2), logsigma = log(0.6))
+
+# Particle Marginal Metropolis-Hastings algorithm
+pmcmc <- function(iterations = 1000, Np = 1000) {
+    # Run particle filter for initial parameter set
+    pf_current <- rulkov_pfilter(params_current, Np)
+    loglik_current <- logLik(pf_current)
+
+    # Storage for results
+    param_samples <- matrix(NA, nrow = iterations, ncol = length(params_current))
+    loglik_samples <- numeric(iterations)
+
+    # MCMC iterations
+    for (i in 1:iterations) {
+        # Propose new parameters with constrained sigma and eta
+        params_new <- mh_transition_kernel(params_current)
+
+        # Run particle filter with proposed parameters
+        pf_new <- rulkov_pfilter(params_new, Np)
+        loglik_new <- logLik(pf_new)
+
+        # Check for valid log-likelihood (no NaN or -Inf)
+        if (is.nan(loglik_new) || is.infinite(loglik_new)) next
+
+        # Compute Metropolis-Hastings acceptance ratio
+        accept_ratio <- exp(loglik_new - loglik_current)
+
+        # Accept or reject
+        if (runif(1) < accept_ratio) {
+            params_current <- params_new
+            loglik_current <- loglik_new
+        }
+
+        # Store samples
+        param_samples[i, ] <- params_current
+        loglik_samples[i] <- loglik_current
+    }
+
+    list(params = param_samples, loglik = loglik_samples)
+}
+
+
+# Run PMCMC
+set.seed(123)
+result <- pmcmc(iterations = 1000, Np = 1000)
+```
+
+```{r}
+# Convert result to data frame for plotting
+param_df <- as.data.frame(result$params)
+names(param_df) <- c("alpha", "y", "sigma", "eta")
+
+# Plot results
+ggplot(param_df, aes(x = 1:1000)) +
+    geom_line(aes(y = alpha), color = "blue") +
+    geom_line(aes(y = y), color = "red") +
+    geom_line(aes(y = sigma), color = "green") +
+    geom_line(aes(y = eta), color = "purple") +
+    labs(title = "Trace plots of parameter samples", x = "Iteration", y = "Parameter Value")
+```

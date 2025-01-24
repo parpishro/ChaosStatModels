@@ -1,0 +1,170 @@
+---
+title: "Modelling Dynamic Chaotic Systems in Practice"
+author: "Par Pishrobat"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# Setting up the environment
+knitr::opts_chunk$set(echo = TRUE) 
+```
+
+## Ground Truth Parameters
+
+To model the dynamics of the Rulkov map, we define the ground truth parameters, which characterize relatively periodic behavior.
+
+```{r true params}
+library(pomp)
+set.seed(123)
+
+# Define ground truth parameters
+true_params <- c(alpha = 2, logeta = log(0.5), logsigma = log(0.05)) 
+
+# Define the state transition model
+rulkov_step <- Csnippet("
+  double eta = exp(logeta);
+  double e = rnorm(0, eta);
+  x = alpha / (1 + x * x) + 1 + e;
+")
+
+# Define the measurement model
+rulkov_rmeasure <- Csnippet("
+  double sigma = exp(logsigma);
+  obs = rnorm(x, sigma);
+")
+
+# Define the density of the measurement process
+rulkov_dmeasure <- Csnippet("
+  double sigma = exp(logsigma);
+  lik = dnorm(obs, x, sigma, give_log);  // Compute Gaussian log-likelihood
+")
+
+# Define the parameter initialization function
+rulkov_init <- Csnippet("
+  x = rnorm(0, 1);  // Initialize latent state
+")
+
+# Simulate data
+rulkov_sim <- pomp(
+    data       = data.frame(time = 1:100, obs = NA),
+    times      = "time",
+    t0         = 0,
+    rinit      = rulkov_init,
+    rprocess   = discrete_time(rulkov_step, delta.t = 1),
+    rmeasure   = rulkov_rmeasure,
+    dmeasure   = rulkov_dmeasure,
+    params     = true_params,
+    statenames = c("x"),
+    paramnames = c("alpha", "logeta", "logsigma")
+)
+
+```
+
+
+```{r}
+# Simulate observations
+rulkov_sim <- pomp::simulate(rulkov_sim, nsim = 1, userdata = list(as.data.frame = TRUE))
+```
+
+
+```{r}
+plot(rulkov_sim)
+```
+
+
+```{r}
+# Particle filter for likelihood estimation
+rulkov_pfilter <- function(params, Np = 1000) {
+    pfilter(
+        rulkov_sim,
+        params = params,
+        Np = Np
+    )
+}
+```
+
+
+```{r}
+# Define the Metropolis-Hastings transition kernel with positivity constraints
+mh_transition_kernel <- function(params) {
+    params_new <- params
+    
+    alpha <- params['alpha']
+    eta <- exp(params['logeta'])
+    sigma <- exp(params['logsigma'])
+    
+    params_new["alpha"] <- rnorm(1, mean = params["alpha"], sd = 1)
+    params_new["logeta"] <- rnorm(1, mean = params["logeta"], sd = 1)
+    params_new["logsigma"] <- rnorm(1, mean = params["logsigma"], sd = 1)
+    
+
+    params_new
+}
+```
+
+
+```{r}
+# Particle Marginal Metropolis-Hastings algorithm
+pmcmc <- function(iterations = 1000, Np = 1000) {
+  # Run particle filter for initial parameter set
+  params_current <- c("alpha" = 1, "logeta" = 0, "logsigma" = 0)
+  pf_current <- rulkov_pfilter(params_current, Np)
+  loglik_current <- logLik(pf_current)
+  
+  # Storage for results
+  param_samples <- matrix(NA, nrow = iterations, ncol = length(params_current))
+  loglik_samples <- numeric(iterations)
+  
+  # MCMC iterations
+  for (i in 1:iterations) {
+    # Propose new parameters with constrained sigma and eta
+    params_new <- mh_transition_kernel(params_current)
+    
+    # Run particle filter with proposed parameters
+    pf_new <- rulkov_pfilter(params_new, Np)
+    loglik_new <- logLik(pf_new)
+    
+    # Check for valid log-likelihood (no NaN or -Inf)
+    if (is.nan(loglik_new) || is.infinite(loglik_new)) next
+    
+    # Compute Metropolis-Hastings acceptance ratio
+    accept_ratio <- exp(loglik_new - loglik_current)
+    
+    # Accept or reject
+    if (runif(1) < accept_ratio) {
+      params_current <- params_new
+      loglik_current <- loglik_new
+    }
+    
+    # Store samples
+    param_samples[i, ] <- params_current
+    loglik_samples[i] <- loglik_current
+  }
+  
+  list(params = param_samples, loglik = loglik_samples)
+}
+
+```
+
+
+```{r}
+# Run PMCMC
+set.seed(123)
+result <- pmcmc(iterations = 10000, Np = 1000)
+```
+
+
+```{r}
+# Convert result to data frame for plotting
+param_df <- as.data.frame(result$params)
+names(param_df) <- c("alpha", "logeta", "logsigma")
+
+# Plot results
+ggplot(param_df, aes(x = 1:10000)) +
+    geom_line(aes(y = alpha), color = "blue") +
+    geom_line(aes(y = exp(logeta)), color = "red") +
+    geom_line(aes(y = exp(logsigma)), color = "green") +
+    labs(title = "Trace plots of parameter samples", x = "Iteration", y = "Parameter Value")
+```
+

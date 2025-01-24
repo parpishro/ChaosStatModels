@@ -1,0 +1,290 @@
+---
+title: "Modeling Dynamic Chaotic Systems in Practice with Both Subsystems"
+author: "Par Pishrobat"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# Setting up the environment
+knitr::opts_chunk$set(echo = TRUE) 
+library(synlik)  # Loading the synlik package for synthetic likelihood inference 
+```
+
+
+```{r true params}
+# Define ground truth parameters for both subsystems
+true_params <- c(alpha = 6, logeta = log(0.01), logsigma = log(0.01)) 
+```
+
+```{r function to compute stats}
+# Function to compute summary statistics for the simulated data
+compute_stats <- function(x, extraArgs, ...) {  
+    obs_data <- as.vector(extraArgs$obsData)
+    stopifnot(length(obs_data) != 0)  # Ensure observed data is non-empty
+    if (!is.matrix(x)) {
+        x <- matrix(x, 1, length(x))  # Ensure input is a matrix
+    }
+    tx <- t(x)
+    X0 <- t(nlar(t(x), lag = c(6, 6, 6, 1, 1), power = c(1, 2, 3, 1, 2)))  # Nonlinear autoregressive features
+    X0 <- cbind(X0, rowMeans(x), rowMeans(x) - apply(x, 1, median))  # Mean and mean-median difference
+    X0 <- cbind(X0, t(slAcf(t(x), max.lag = 11)))  # Autocorrelation features
+    X0 <- cbind(X0, apply(t(abs(apply(
+        sign(apply(x, 1, diff)),
+        2, diff
+    ))), 1, sum) / 2)  # Count of zero crossings
+    return(X0)
+}
+```
+
+```{r function to simulate data for fast subsystem}
+# Function to simulate fast subsystems of the Rulkov map
+simulate_rulkov <- function(param, nsim, extraArgs, ...) {
+    nBurn <- extraArgs$nBurn  # Burn-in period
+    nObs <- extraArgs$nObs  # Number of observations to generate 
+    
+    # Handle initialization
+    randInit <- ifelse(is.null(extraArgs$randInit), TRUE, extraArgs$randInit)
+    initVal <- 
+    
+    # Extract parameters
+    alpha <- param['alpha']
+    sigma <- exp(param['logsigma'])
+    y <- 1
+    eta <- exp(param['logeta'])
+     
+    # Simulation function for one trajectory
+    sim <- function() {
+        x_vec <- numeric(nBurn + nObs)
+        x_obs <- numeric(nBurn + nObs)
+        x_vec[1] <- ifelse(is.null(extraArgs$initVal), runif(1), extraArgs$initVal)  
+        x_obs[1] <- x_vec[1] + sigma*rnorm(1)
+        
+        for (j in 2:(nBurn + nObs)) {
+            x_vec[j] <- alpha/(1 + x_vec[j - 1]^2) + y + eta*rnorm(1)
+            x_obs[j] <- x_vec[j] + sigma*rnorm(1)
+        }
+        return(x_obs)
+    }
+    
+    # Generate multiple trajectories
+    x <- replicate(nsim, sim())
+    return(t(x))
+}
+
+```
+
+```{r creat synlik object}
+# Define a synthetic likelihood object for both subsystems of the Rulkov map
+rulkov_sl <- synlik(
+    simulator = simulate_rulkov,  # Simulation function
+    summaries = compute_stats,   # Summary statistics function  
+    param     = true_params,     # True parameters
+    extraArgs = list(            # Additional simulation arguments
+        "nObs"     = 50,         # Number of observations
+        "nBurn"    = 50,         # Burn-in period
+        "randInit" = TRUE        # Random initialization
+    ) 
+)
+
+rulkov_sl@data <- simulate(rulkov_sl, nsim = 1) 
+rulkov_sl@extraArgs$obsData <- rulkov_sl@data
+
+# Define a plotting function and visualize the data
+rulkov_sl@plotFun <- function(input, ...) {
+    plot(drop(input), type = "l", ylab = "Pop", xlab = "Time", ...)
+}
+plot(rulkov_sl)
+
+
+```
+
+```{r function to simulate MCMC}
+# function to run the MCMC
+synMCMC <- function(object, initPar, niter, nsim, propCov, burn = 0, priorFun = function(param) 0,
+                    targetRate = NULL, recompute = FALSE, multicore = !is.null(cluster),
+                    cluster = NULL, ncores = parallel::detectCores(), control = list()) {
+
+  y <- object@data
+  N <- niter + burn
+  ctrl <- list(
+    theta = 0.85, adaptStart = 0, adaptStop = N,
+    saveFile = NULL, saveFreq = 100, verbFreq = 500, verbose = FALSE
+  )
+  ctrl <- synlik:::.ctrlSetup(innerCtrl = ctrl, outerCtrl = control)
+  if (ctrl$theta > 1 || ctrl$theta < 0.5) {
+    stop("control$theta should be between 0.5 and 1")
+  }
+  if (!is.null(ctrl$saveFile) && !is.character(ctrl$saveFile)) {
+    stop("\"ctrl$saveFile\" should be a character vector")
+  }
+  stopifnot(ctrl$adaptStart <= ctrl$adaptStop, ctrl$adaptStart >=
+    0, ctrl$adaptStop <= N)
+  
+  if (is.matrix(propCov) == FALSE) {
+    propCov <- diag(propCov)
+  }
+  if (nrow(propCov) != ncol(propCov)) {
+    stop("propCov should be a square matrix")
+  }
+  if (nrow(propCov) != length(initPar)) {
+    stop("nrow(propCov) != length(initPar)")
+  }
+  fixPar <- which(diag(propCov) == 0)
+  anyFix <- (length(fixPar) > 0)
+  savedCov <- propCov
+  if (anyFix) {
+    diag(propCov)[fixPar] <- 0.1
+  }
+  cholFact <- t(chol(unname(propCov)))
+  nPar <- length(initPar)
+  parNames <- names(initPar)
+  currPar <- unname(initPar)
+  propPar <- numeric(nPar)
+  mcmcSample <- matrix(NA, niter, nPar)
+  llkChain <- numeric(niter)
+  currLogLik <- propLogLik <- tmpLik <- -10^99
+  currPrior <- priorFun(initPar)
+  accept <- 0
+  unifVar <- runif(N)
+
+
+  if (multicore) {
+    tmp <- .clusterSetUp(
+      cluster = cluster, ncores = ncores,
+      libraries = "synlik"
+    )
+    cluster <- tmp$cluster
+    ncores <- tmp$ncores
+    clusterCreated <- tmp$clusterCreated
+  }
+  storeIndex <- 1
+  for (ii in 1:N) {
+    pert <- rnorm(nPar)
+    propPar <- currPar + as.vector(cholFact %*% pert)
+    if (anyFix) {
+      propPar[fixPar] <- currPar[fixPar]
+    }
+    names(propPar) <- parNames
+    propPrior <- priorFun(propPar)
+    names(propPar) <- parNames
+    if (is.finite(propPrior)) {
+      propLogLik <- try(slik(object,
+        param = propPar,
+        nsim = nsim, multicore = multicore, ncores = ncores,
+        cluster = cluster
+      ), silent = TRUE)
+      if (!is.numeric(propLogLik) || !is.finite(propLogLik)) {
+        propLogLik <- -Inf
+      }
+      if (recompute) {
+        tmpLik <- try(slik(object,
+          param = currPar,
+          nsim = nsim, multicore = multicore, ncores = ncores,
+          cluster = cluster
+        ))
+        if (is.numeric(tmpLik) && is.finite(tmpLik)) {
+          currLogLik <- tmpLik
+        }
+      }
+      likDiff <- propLogLik - currLogLik + propPrior -
+        currPrior
+      alpha <- min(1, exp(likDiff))
+      if (!is.finite(alpha)) {
+        alpha <- ifelse(likDiff >= 0, 1, 0)
+      }
+      if (likDiff > log(unifVar[ii])) {
+        currPar <- propPar
+        currPrior <- propPrior
+        currLogLik <- propLogLik
+        if (ii > burn) {
+          accept <- accept + 1
+        }
+      }
+    } else {
+      alpha <- 0
+    }
+    if (ii > burn) {
+      mcmcSample[storeIndex, ] <- currPar
+      llkChain[storeIndex] <- currLogLik
+      storeIndex <- storeIndex + 1
+    }
+    if (!is.null(targetRate) && (ii >= ctrl$adaptStart) &&
+      (ii <= ctrl$adaptStop)) {
+      cholFact <- synlik:::.adaptChol(
+        nPar = nPar, iter = ii, S = cholFact,
+        U = pert, gamma = ctrl$theta, alpha = alpha,
+        accRate = targetRate
+      )
+    }
+    if (!is.null(ctrl$saveFile) && !(ii %% ctrl$saveFreq)) {
+      save(file = ctrl$saveFile, new("smcmc", object,
+        initPar = initPar, niter = as.integer(niter),
+        nsim = as.integer(nsim), propCov = propCov,
+        burn = as.integer(burn), priorFun = priorFun,
+        targetRate = targetRate, recompute = recompute,
+        multicore = multicore, ncores = as.integer(ncores),
+        control = control, accRate = accept / niter, chains = mcmcSample,
+        llkChain = llkChain
+      ))
+    }
+    if (ctrl$verbose == TRUE && (ii > burn) && !(ii %% ctrl$verbFreq)) {
+      tmp <- colMeans(mcmcSample[1:ii, ], na.rm = TRUE)
+      names(tmp) <- names(object@param)
+      cat(paste(
+        "Empirical posterior means at iteration",
+        ii - burn, "\n"
+      ))
+      print(tmp)
+    }
+  }
+  if (multicore && clusterCreated) {
+    stopCluster(cluster)
+  }
+  return(new("smcmc", object,
+    initPar = initPar, niter = as.integer(niter),
+    nsim = as.integer(nsim), propCov = propCov, burn = as.integer(burn),
+    priorFun = priorFun, targetRate = targetRate, recompute = recompute,
+    multicore = multicore, ncores = as.integer(ncores),
+    control = control, accRate = accept / niter, chains = mcmcSample,
+    llkChain = llkChain
+  ))
+}
+```
+
+
+```{r run synMCMC}
+
+# Perform MCMC sampling to estimate posterior distributions
+rulkov_smcmc <- synMCMC(  
+  rulkov_sl,
+  initPar    = c("alpha" = 1, "logsigma" = 0, "logeta" = 0),  # Initial parameter values
+  niter      = 2100,  # Number of iterations
+  burn       = 100,   # Burn-in period
+  propCov    = diag(c(1, 0.2, 0.2)) ,  # Proposal covariance
+  nsim       = 100,  # Number of simulations per iteration
+  priorFun   = function(input, ...) {
+    if (
+      input['logsigma'] >= log(0.001) && input['logsigma'] <= log(10) && # Restrict logsigma
+      input['logeta'] >= log(0.001) && input['logeta'] <= log(10) &&    # Restrict logeta
+      input['alpha'] > 0 && input['alpha'] <= 10                      # Restrict alpha
+    ) {
+      0  # Uniform within bounds (log probability = 0)
+    } else {
+      -Inf  # Outside bounds (log probability = -Inf, invalid)
+    }
+  },  # Uniform prior
+  targetRate = 0.2,  # Target acceptance rate
+  multicore  = FALSE,  # Disable multicore
+  control    = list(verbose = TRUE) 
+)
+```
+
+## Visualizing MCMC Results
+
+Visualize the posterior chains to evaluate convergence and mixing.
+
+```{r visualize MCMC results}
+# Visualize MCMC results
+plot(rulkov_smcmc)
+```

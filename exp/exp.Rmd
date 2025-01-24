@@ -1,0 +1,679 @@
+---
+title: "Modelling Dynamic Chaotic Systems in Practice"
+author: "Par Pishrobat"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+### **Setup**
+
+
+```{r}
+# Environment setup
+knitr::opts_chunk$set(echo = TRUE)
+library(pomp)
+library(synlik)  # Synthetic likelihood inference 
+library(foreach)
+library(doParallel)
+library(ggplot2)
+library(gridExtra)
+set.seed(123)
+
+# Load all R scripts in the "R" folder
+r_files <- list.files(path = "R", pattern = "\\.R$", full.names = TRUE)
+sapply(r_files, source)
+```
+
+---
+
+### **Defining the Stochastic Rulkov Map**
+Here, we define a `pomp` object to simulate the fast subsystem of the stochastic Rulkov map. The slow subsystem \(y\) is fixed at -2.8, as per the goal. Key components include:
+- `rinit`: Initializes the states.
+- `rprocess`: Defines the transition dynamics of the fast subsystem.
+- `rmeasure`: Simulates measurement noise.
+- `params`: Parameters for the simulation, including \(\alpha\), \(\eta\), and \(\sigma\).
+
+```{r}
+# Define the POMP object for the stochastic Rulkov map
+pomp_object <- pomp::pomp(
+  data = data.frame(time = 1:100, obs = NA),
+  times = "time",
+  t0 = 0,
+  rinit = pmcmc_init,
+  rprocess = discrete_time(pmcmc_step, delta.t = 1),
+  rmeasure = pmcmc_rmeasure,
+  dmeasure = pmcmc_dmeasure,
+  dprior = pmcmc_dprior,
+  params = c(
+    alpha = 4.2,  # Initial test value
+    logeta = log(0.01),
+    logsigma = log(0.01)
+  ),
+  statenames = c("x", "y"),
+  paramnames = c("alpha", "logeta", "logsigma")
+)
+```
+
+---
+
+
+### **Simulating and Visualizing Trajectories**
+We simulate the behavior of the fast subsystem of the Rulkov map under identical parameter settings (\(\alpha = 4.2\), \(\eta = 0.01\), \(\sigma = 0.01\)). The simulations help us examine the evolution of the fast variable \(x\) over time. We focus on a single trajectory to analyze the detailed dynamics and assess its aperiodicity, a hallmark of chaotic behavior.
+
+```{r}
+# Simulate sample trajectories
+sample_simulations <- pomp::simulate(
+  pomp_object,
+  params = c(alpha = 4.2, logeta = log(0.01), logsigma = log(0.01)),
+  nsim = 1  # Single simulation for clarity
+)
+```
+
+
+### **Step 1: Check for Aperiodicity**
+```{r}
+# Extract and plot the trajectory
+sim_data <- as.data.frame(t(sample_simulations[[1]]@data))
+sim_data$time <- 1:nrow(sim_data)
+
+ggplot(sim_data, aes(x = time, y = obs)) +
+  geom_line(color = "blue") +
+  labs(title = "Time Series of x", x = "Time", y = "x") +
+  theme_minimal()
+```
+
+The plot illustrates the time series of \(x\) over 100 discrete time steps. The trajectory exhibits irregular oscillations with no apparent periodicity, remaining bounded within the approximate range \([-1.5, 1.5]\). This bounded, non-repeating behavior provides preliminary evidence of chaotic dynamics in the fast subsystem.
+
+The sharp transitions and irregular bursts observed in the trajectory are consistent with the expected dynamics of the fast subsystem under stochastic perturbations. The noise (\(\eta = 0.01\), \(\sigma = 0.01\)) introduces slight fluctuations that amplify the irregularity without obscuring the underlying structure. These characteristics suggest the system may exhibit chaotic behavior, which will be further analyzed through return maps and the computation of the largest Lyapunov exponent. 
+
+
+
+---
+
+###  Return Map 
+The return map helps visualize the structure of the attractor, which could reveal a chaotic attractor's fractal-like geometry.
+
+```{r}
+# Prepare return map data
+return_map_data <- data.frame(
+  x_n = sim_data$obs[-nrow(sim_data)],
+  x_n1 = sim_data$obs[-1]
+)
+
+# Plot the return map
+ggplot(return_map_data, aes(x = x_n, y = x_n1)) +
+  geom_point(size = 0.5, alpha = 0.6, color = "darkgreen") +
+  labs(title = "Return Map (x[n+1] vs. x[n])",
+       x = expression(x[n]),
+       y = expression(x[n+1])) +
+  theme_minimal()
+```
+
+---
+
+### **Step 3: Largest Lyapunov Exponent**
+A positive largest Lyapunov exponent confirms exponential divergence of trajectories, a hallmark of chaos.
+
+```{r}
+# Define Lyapunov exponent function
+lyapunov_exponent <- function(x_series, alpha) {
+  f_prime <- function(x) {
+    return(-2 * alpha * x / (1 + x^2)^2)
+  }
+  derivatives <- f_prime(x_series)
+  valid <- which(derivatives != 0)
+  lambda <- mean(log(abs(derivatives[valid])))
+  return(lambda)
+}
+
+# Compute Lyapunov exponent
+lambda <- lyapunov_exponent(sim_data$obs, alpha = 4.2)
+cat("Estimated Largest Lyapunov Exponent:", lambda, "\n")
+```
+
+---
+
+### **Step 4: Bifurcation Diagram**
+The bifurcation diagram explores how the system transitions between periodic and chaotic regimes as \(\alpha\) varies.
+
+```{r}
+# Sweep alpha values
+alpha_values <- seq(0, 10, by = 0.05)
+bifurcation_data <- data.frame()
+
+for (alpha_val in alpha_values) {
+  sim_result <- pomp::simulate(
+    pomp_object,
+    params = c(alpha = alpha_val, logeta = log(0.01), logsigma = log(0.01)),
+    nsim = 1
+  )
+  sim_data <- as.data.frame(t(sim_result@data))
+  sim_data <- sim_data[(nrow(sim_data) - 100):nrow(sim_data), ]
+  bifurcation_data <- rbind(bifurcation_data, data.frame(alpha = alpha_val, x = sim_data))
+}
+
+# Plot bifurcation diagram
+ggplot(bifurcation_data, aes(x = alpha, y = x)) +
+  geom_point(size = 0.5, alpha = 0.6, color = "black") +
+  labs(title = "Bifurcation Diagram for Rulkov Map", x = expression(alpha), y = "x") +
+  theme_minimal()
+```
+
+---
+
+### **Step 5: Power Spectrum Analysis**
+The power spectrum reveals broadband frequency components, a signature of chaos.
+
+```{r}
+# Compute power spectrum
+power_spectrum <- abs(fft(sim_data))^2
+freq <- seq(0, length(power_spectrum) - 1) / length(power_spectrum)
+
+# Plot the power spectrum
+ggplot(data.frame(Frequency = freq, Power = power_spectrum), aes(x = Frequency, y = Power)) +
+  geom_line(color = "blue") +
+  labs(title = "Power Spectrum of x", x = "Frequency", y = "Power") +
+  theme_minimal()
+```
+
+### **Step 6: Exploring Noise Effects**
+In this step, we explore how varying the process noise (\(\eta\)) and measurement noise (\(\sigma\)) affects the chaotic behavior of the fast subsystem. Noise can obscure or amplify chaotic dynamics, making it crucial to understand its influence.
+
+**Code Explanation**:
+- We simulate the system for different values of \(\eta\) and \(\sigma\).
+- For each combination of \(\eta\) and \(\sigma\), we generate a time series plot to observe how noise impacts the chaotic dynamics.
+- The resulting plots help visualize whether the system retains its chaotic nature under different noise intensities.
+
+```{r}
+#  Exploring Noise Effects
+
+# Define noise levels to explore
+eta_values <- c(0.005, 0.05, 0.5)   # Process noise
+sigma_values <- c(0.005, 0.05, 0.5) # Measurement noise
+
+# Initialize storage for plots
+noise_effects_plots <- list()
+
+# Loop over noise levels
+plot_index <- 1
+for (eta in eta_values) {
+  for (sigma in sigma_values) {
+    # Simulate the system with current noise levels
+    sim_result <- pomp::simulate(
+      pomp_object,
+      params = c(alpha = 4.2, logeta = log(eta), logsigma = log(sigma)),
+      nsim = 1
+    )
+    
+    # Extract simulation data
+    sim_data <- as.data.frame(t(sim_result@data))
+    sim_data$time <- 1:nrow(sim_data)
+    
+    # Generate a time series plot
+    noise_effects_plots[[plot_index]] <- ggplot(sim_data, aes(x = time, y = obs)) +
+      geom_line(color = "navy") +
+      labs(
+        title = paste(expression(eta), " = ", eta, ", ", expression(sigma), " = ", sigma),
+        x = "Time",
+        y = "x"
+      ) +
+      theme_minimal()
+    
+    plot_index <- plot_index + 1
+  }
+}
+
+# Arrange and display all plots in a grid
+gridExtra::grid.arrange(grobs = noise_effects_plots, ncol = length(sigma_values))
+```
+
+
+
+## Ground Truth Parameters
+
+```{r}
+# Define the grid of parameters to evaluate
+param_grid <- as.data.frame(
+  expand.grid(
+    alpha    = seq(2, 8, by = 2),
+    logeta   = log(seq(0.01, 0.61, by = 0.2)),
+    logsigma = log(seq(0.01, 0.31, by = 0.1))
+    )
+  )
+n_params <- nrow(param_grid)
+```
+
+
+
+## Particle Filter and PMCMC
+
+
+
+```{r}
+# Initialize the main results list
+results_pmcmc <- list()
+
+```
+
+```{r}
+# Set up parallel backend
+n_cores  <- parallel::detectCores() - 1  # Leave one core free
+cl       <- makeCluster(n_cores, type = "PSOCK")
+registerDoParallel(cl)
+
+# Parallel loop using foreach
+n_params <- nrow(param_grid)
+results_pmcmc  <- foreach(
+  i         = 1:n_params, 
+  .combine  = append, 
+  .packages = c("pomp")
+) %dopar% {
+    
+  # Measure PMCMC computation time
+  start_time <- Sys.time()  # Start timer
+  
+  true_pars <- c(
+    "alpha"       = param_grid[i, "alpha"], 
+    "logeta"      = param_grid[i, "logeta"], 
+    "logsigma"    = param_grid[i, "logsigma"]
+  )
+
+  
+  # Define POMP object
+  pomp_object <- pomp::pomp(
+    data       = data.frame(time = 1:100, obs = NA),
+    times      = "time",
+    t0         = 0,
+    rinit      = pmcmc_init,
+    rprocess   = discrete_time(pmcmc_step, delta.t = 1),
+    rmeasure   = pmcmc_rmeasure,
+    dmeasure   = pmcmc_dmeasure,
+    dprior     = pmcmc_dprior,
+    params     = true_pars,
+    statenames = c("x"),
+    paramnames = c("alpha", "logeta", "logsigma")
+  )
+  
+  # Simulate datasets
+  pomp_object <- pomp::simulate(pomp_object, nsim = 1)
+  
+  # Run PMCMC
+  pmcmc_result <- pomp::pmcmc(
+    data     = pomp_object,
+    Nmcmc    = 2000,
+    proposal = mvn_diag_rw(rw.sd = c(alpha = 1, logeta = 0.5, logsigma = 0.5)),
+    Np       = 100
+  )
+  
+  end_time <- Sys.time()  # End timer
+  
+  # Calculate computation time
+  computation_time <- round(as.numeric(difftime(end_time, start_time, units = "secs")))
+  
+  # Add computation time to result as an attribute
+  attr(pmcmc_result, "time") <- computation_time
+  
+  pars <- round(c(coef(pmcmc_result)[1], exp(coef(pmcmc_result)[2:3])), 3)
+  write(
+    paste("PMCMC row", i, paste(pars, collapse = ", "), "\n"), 
+    file   = "output_log.txt", 
+    append = TRUE
+  )
+  # Return the result with the added attribute
+  pmcmc_result
+}
+
+# Stop parallel backend
+stopCluster(cl)
+
+
+
+```
+
+```{r}
+datasets <- lapply(results_pmcmc, function(obj) obj@data)
+```
+
+
+```{r}
+results_sl <- list()
+for(i in seq_len(n_params)) { 
+  start_time <- Sys.time()  # Start timer
+  sl_object <- synlik::synlik(
+    simulator = sl_simulate,  # Simulation function
+    summaries = sl_stats,   # Summary statistics function  
+    param     = c(
+      "alpha"       = param_grid[i, "alpha"], 
+      "logeta"      = param_grid[i, "logeta"], 
+      "logsigma"    = param_grid[i, "logsigma"]
+    ),     # True parameters
+    data      = datasets[[i]],
+    extraArgs = list(            # Additional simulation arguments
+      "nObs"     = 100,         # Number of observations
+      "nBurn"    = 0,         # Burn-in period
+      "randInit" = TRUE        # Random initialization
+    ) 
+  )
+  
+  # Define a synthetic likelihood object for fast subsystems of the Rulkov map
+  sl_result <- sl_mcmc(  # Perform MCMC sampling to estimate posterior distributions
+    sl_object,
+    initPar    = c("alpha" = 1, "logsigma" = 0, "logeta" = 0),  # Initial parameter values
+    niter      = 2000,  # Number of iterations
+    burn       = 0,   # Burn-in period
+    propCov    = diag(c(1, 0.5, 0.5)) ,  # Proposal covariance
+    nsim       = 100,  # Number of simulations per iteration
+    priorFun   = function(input, ...) {
+      if (
+        input['logsigma'] >= log(0.001) && input['logsigma'] <= log(10) && # Restrict logsigma
+        input['logeta'] >= log(0.001) && input['logeta'] <= log(10) &&    # Restrict logeta
+        input['alpha'] > 0 && input['alpha'] <= 10                      # Restrict alpha
+      ) 0  # Uniform within bounds (log probability = 0)
+      else
+        -Inf  # Outside bounds (log probability = -Inf, invalid)
+    },  # Uniform prior
+    targetRate = NULL  # Target acceptance rate
+  )
+  end_time <- Sys.time()  # End timer
+  
+  # Calculate computation time
+  computation_time <- round(as.numeric(difftime(end_time, start_time, units = "secs")))
+  
+  # Add computation time to result as an attribute
+  attr(sl_result, "time") <- computation_time
+  pars <- round(c(colMeans(sl_result@chains)[1], exp(colMeans(sl_result@chains)[2:3])), 3)
+  write(
+    paste("SL row", i,  paste(pars, collapse = ", "), "\n"), 
+    file   = "output_log.txt", 
+    append = TRUE
+  )
+  results_sl <- append(results_sl, sl_result)
+}
+
+
+```
+
+```{r}
+sl_df <- do.call(rbind, lapply(results_sl, function(obj) colMeans(obj@chains)))
+pmcmc_df <- do.call(rbind, lapply(results_pmcmc, function(obj) coef(obj)))
+
+results <- data.frame(
+  alpha_true  = param_grid[, "alpha"],
+  eta_true    = exp(param_grid[, "logeta"]),
+  sigma_true  = exp(param_grid[, "logsigma"]),
+  alpha_sl    = sl_df[,1],
+  eta_sl      = exp(sl_df[,2]),
+  sigma_sl    = exp(sl_df[,3]),
+  alpha_pmcmc = pmcmc_df[,1],
+  eta_pmcmc   = exp(pmcmc_df[,2]),
+  sigma_pmcmc = exp(pmcmc_df[,3])
+)
+```
+
+
+```{r}
+# Calculate bias for SL method
+bias_sl <- colMeans(results[, c("alpha_sl", "eta_sl", "sigma_sl")] - results[, c("alpha_true", "eta_true", "sigma_true")])
+
+# Calculate bias for PMCMC method
+bias_pmcmc <- colMeans(results[, c("alpha_pmcmc", "eta_pmcmc", "sigma_pmcmc")] - results[, c("alpha_true", "eta_true", "sigma_true")])
+
+# Combine into a table
+bias_table <- data.frame(Method = c("SL", "PMCMC"),
+                         Alpha_Bias = c(bias_sl[1], bias_pmcmc[1]),
+                         Eta_Bias = c(bias_sl[2], bias_pmcmc[2]),
+                         Sigma_Bias = c(bias_sl[3], bias_pmcmc[3]))
+bias_table
+
+```
+
+
+
+```{r}
+# Calculate RMSE for SL method
+rmse_sl <- sqrt(colMeans((results[, c("alpha_sl", "eta_sl", "sigma_sl")] - results[, c("alpha_true", "eta_true", "sigma_true")])^2))
+
+# Calculate RMSE for PMCMC method
+rmse_pmcmc <- sqrt(colMeans((results[, c("alpha_pmcmc", "eta_pmcmc", "sigma_pmcmc")] - results[, c("alpha_true", "eta_true", "sigma_true")])^2))
+
+# Combine into a table
+rmse_table <- data.frame(Method = c("SL", "PMCMC"),
+                         Alpha_RMSE = c(rmse_sl[1], rmse_pmcmc[1]),
+                         Eta_RMSE = c(rmse_sl[2], rmse_pmcmc[2]),
+                         Sigma_RMSE = c(rmse_sl[3], rmse_pmcmc[3]))
+rmse_table
+
+```
+```{r}
+# Calculate correlation coefficients for each parameter and method
+correlation_results <- data.frame(
+  Parameter = c("Alpha", "Eta", "Sigma"),
+  SL_Correlation = c(
+    cor(results$alpha_true, results$alpha_sl),
+    cor(results$eta_true, results$eta_sl),
+    cor(results$sigma_true, results$sigma_sl)
+  ),
+  PMCMC_Correlation = c(
+    cor(results$alpha_true, results$alpha_pmcmc),
+    cor(results$eta_true, results$eta_pmcmc),
+    cor(results$sigma_true, results$sigma_pmcmc)
+  )
+)
+
+# Print the correlation table
+correlation_results
+
+```
+
+
+```{r}
+library(ggplot2)
+ggplot(results, aes(x = alpha_true)) +
+  geom_point(aes(y = alpha_sl, color = "SL")) +
+  geom_point(aes(y = alpha_pmcmc, color = "PMCMC")) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = "True vs Estimated Alpha", x = "True Alpha", y = "Estimated Alpha") +
+  scale_color_manual(values = c("SL" = "blue", "PMCMC" = "red")) +
+  theme_minimal()
+
+ggplot(results, aes(x = eta_true)) +
+  geom_point(aes(y = eta_sl, color = "SL")) +
+  geom_point(aes(y = eta_pmcmc, color = "PMCMC")) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = "True vs Estimated Eta", x = "True Eta", y = "Estimated Eta") +
+  scale_color_manual(values = c("SL" = "blue", "PMCMC" = "red")) +
+  theme_minimal()
+
+ggplot(results, aes(x = sigma_true)) +
+  geom_point(aes(y = sigma_sl, color = "SL")) +
+  geom_point(aes(y = sigma_pmcmc, color = "PMCMC")) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = "True vs Estimated Sigma", x = "True Sigma", y = "Estimated Sigma") +
+  scale_color_manual(values = c("SL" = "blue", "PMCMC" = "red")) +
+  theme_minimal()
+
+```
+
+
+```{r}
+library(ggplot2)
+library(tidyr)
+comp_time  <- data.frame(
+  time_sl     = do.call(rbind, lapply(results_sl, function(obj) obj@time)),
+  time_pmcmc  = do.call(rbind, lapply(results_pmcmc, function(obj) obj@time))
+)
+
+# Pivot data for visualization
+comp_long <- comp_time %>%
+  pivot_longer(cols = c(time_sl, time_pmcmc), names_to = "method", values_to = "time")
+
+# Create boxplot with  y-axis
+ggplot(comp_long, aes(x = method, y = time, fill = method)) +
+  geom_boxplot() +
+  labs(
+    title = "Computation Times for SL and PMCMC Methods",
+    x = "Method",
+    y = "Time (seconds)"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+library(ggplot2)
+library(patchwork)
+
+# Create differences and averages for SL method
+results <- results %>%
+  mutate(alpha_diff_sl = alpha_sl - alpha_true,
+         alpha_avg_sl = (alpha_sl + alpha_true) / 2,
+         eta_diff_sl = eta_sl - eta_true,
+         eta_avg_sl = (eta_sl + eta_true) / 2,
+         sigma_diff_sl = sigma_sl - sigma_true,
+         sigma_avg_sl = (sigma_sl + sigma_true) / 2,
+         alpha_diff_pmcmc = alpha_pmcmc - alpha_true,
+         alpha_avg_pmcmc = (alpha_pmcmc + alpha_true) / 2,
+         eta_diff_pmcmc = eta_pmcmc - eta_true,
+         eta_avg_pmcmc = (eta_pmcmc + eta_true) / 2,
+         sigma_diff_pmcmc = sigma_pmcmc - sigma_true,
+         sigma_avg_pmcmc = (sigma_pmcmc + sigma_true) / 2)
+
+# Function to create Bland-Altman plots
+create_ba_plot <- function(avg, diff, title) {
+  ggplot(results, aes(x = !!sym(avg), y = !!sym(diff))) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(title = title, x = "Average", y = "Difference") +
+    theme_minimal()
+}
+
+# SL Bland-Altman plots
+ba_sl_alpha <- create_ba_plot("alpha_avg_sl", "alpha_diff_sl", "SL Alpha")
+ba_sl_eta <- create_ba_plot("eta_avg_sl", "eta_diff_sl", "SL Eta")
+ba_sl_sigma <- create_ba_plot("sigma_avg_sl", "sigma_diff_sl", "SL Sigma")
+
+# PMCMC Bland-Altman plots
+ba_pmcmc_alpha <- create_ba_plot("alpha_avg_pmcmc", "alpha_diff_pmcmc", "PMCMC Alpha")
+ba_pmcmc_eta <- create_ba_plot("eta_avg_pmcmc", "eta_diff_pmcmc", "PMCMC Eta")
+ba_pmcmc_sigma <- create_ba_plot("sigma_avg_pmcmc", "sigma_diff_pmcmc", "PMCMC Sigma")
+
+# Combine all plots into a grid
+ba_grid <- (ba_sl_alpha | ba_sl_eta | ba_sl_sigma) / 
+           (ba_pmcmc_alpha | ba_pmcmc_eta | ba_pmcmc_sigma)
+
+# Print the grid
+print(ba_grid)
+
+```
+
+
+
+```{r}
+library(tidyr)
+
+# Reshape data for residuals
+results_long <- results %>%
+  pivot_longer(cols = c(alpha_sl, eta_sl, sigma_sl, alpha_pmcmc, eta_pmcmc, sigma_pmcmc),
+               names_to = c("Parameter", "Method"), 
+               names_sep = "_", 
+               values_to = "Estimate") %>%
+  mutate(Residual = Estimate - case_when(
+    Parameter == "alpha" ~ alpha_true,
+    Parameter == "eta" ~ eta_true,
+    Parameter == "sigma" ~ sigma_true
+  ))
+
+# Boxplot for residuals by parameter and method
+residual_boxplot <- ggplot(results_long, aes(x = Parameter, y = Residual, fill = Method)) +
+  geom_boxplot() +
+  facet_wrap(~ Parameter, scales = "free") +
+  labs(title = "Residual Boxplot by Parameter and Method", x = "Parameter", y = "Residuals (Estimate - True)") +
+  theme_minimal()
+
+# Print the plot
+print(residual_boxplot)
+
+```
+
+-----------------------------rest
+
+
+
+```{r}
+# =======================================
+# ggplot2 Heatmap
+# =======================================
+# Convert data to long format for ggplot2
+library(ggplot2)
+
+
+# Generate a heatmap for eta and log-likelihood, aggregated across logsigma
+ggplot(param_grid, aes(x = alpha, y = exp(logeta), fill = logLik)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "magma") + # Use a visually distinct color palette
+  labs(
+    title = "Log-Likelihood Surface (Heatmap)",
+    x = "Alpha",                            # x-axis label for alpha
+    y = expression(eta),                    # y-axis label for eta
+    fill = "Log-Likelihood"                 # Legend label
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),    # Adjust axis text size
+    axis.title = element_text(size = 12),   # Adjust axis title size
+    legend.title = element_text(size = 12), # Adjust legend title size
+    legend.text = element_text(size = 10)   # Adjust legend text size
+  )
+
+```
+
+
+
+
+To further explore potential biases, I generate difference-versus-average plots, allowing me to assess how estimation errors evolve across the range of true values. This view highlights whether certain parameter intervals are more susceptible to estimation drift or variability.
+
+
+
+```{r Bland-Altman plots}
+# Create differences and averages for SL method
+results <- results %>%
+  mutate(alpha_diff_sl = alpha_sl - alpha_true,
+         alpha_avg_sl = (alpha_sl + alpha_true) / 2,
+         eta_diff_sl = eta_sl - eta_true,
+         eta_avg_sl = (eta_sl + eta_true) / 2,
+         sigma_diff_sl = sigma_sl - sigma_true,
+         sigma_avg_sl = (sigma_sl + sigma_true) / 2,
+         alpha_diff_pmcmc = alpha_pmcmc - alpha_true,
+         alpha_avg_pmcmc = (alpha_pmcmc + alpha_true) / 2,
+         eta_diff_pmcmc = eta_pmcmc - eta_true,
+         eta_avg_pmcmc = (eta_pmcmc + eta_true) / 2,
+         sigma_diff_pmcmc = sigma_pmcmc - sigma_true,
+         sigma_avg_pmcmc = (sigma_pmcmc + sigma_true) / 2)
+
+# Function to create Bland-Altman plots
+create_ba_plot <- function(avg, diff, title) {
+  ggplot(results, aes(x = !!sym(avg), y = !!sym(diff))) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(title = title, x = "Average", y = "Difference") +
+    theme_minimal()
+}
+
+# SL Bland-Altman plots
+ba_sl_alpha <- create_ba_plot("alpha_avg_sl", "alpha_diff_sl", "SL Alpha")
+ba_sl_eta <- create_ba_plot("eta_avg_sl", "eta_diff_sl", "SL Eta")
+ba_sl_sigma <- create_ba_plot("sigma_avg_sl", "sigma_diff_sl", "SL Sigma")
+
+# PMCMC Bland-Altman plots
+ba_pmcmc_alpha <- create_ba_plot("alpha_avg_pmcmc", "alpha_diff_pmcmc", "PMCMC Alpha")
+ba_pmcmc_eta <- create_ba_plot("eta_avg_pmcmc", "eta_diff_pmcmc", "PMCMC Eta")
+ba_pmcmc_sigma <- create_ba_plot("sigma_avg_pmcmc", "sigma_diff_pmcmc", "PMCMC Sigma")
+
+# Combine all plots into a grid
+ba_grid <- (ba_sl_alpha | ba_sl_eta | ba_sl_sigma) / 
+           (ba_pmcmc_alpha | ba_pmcmc_eta | ba_pmcmc_sigma)
+
+# Print the grid
+print(ba_grid)
+
+```
