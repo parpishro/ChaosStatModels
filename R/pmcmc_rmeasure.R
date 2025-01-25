@@ -6,6 +6,7 @@
 #' @param logsigma Logarithm of the measurement noise standard deviation (`sigma`).
 #' @return A Csnippet defining the measurement model.
 #' @importFrom pomp Csnippet
+library(pomp)
 pmcmc_rmeasure <- Csnippet("
   double sigma = exp(logsigma);
   obs = rnorm(x, sigma);

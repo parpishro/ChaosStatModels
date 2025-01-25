@@ -8,6 +8,7 @@
 #' @param give_log Logical indicator; if `TRUE`, the log-likelihood is returned.
 #' @return A Csnippet defining the measurement density model.
 #' @importFrom pomp Csnippet
+library(pomp)
 pmcmc_dmeasure <- Csnippet("
   double sigma = exp(logsigma);
   lik = dnorm(obs, x, sigma, give_log);

@@ -16,6 +16,7 @@
 #' @importFrom pomp Csnippet
 #' 
 #' @export
+library(pomp)
 pmcmc_step <- Csnippet("
   double eta = exp(logeta);
   double e = rnorm(0, eta);

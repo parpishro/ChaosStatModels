@@ -12,6 +12,7 @@
 #'
 #' @return A Csnippet defining the prior function.
 #' @importFrom pomp Csnippet
+library(pomp)
 pmcmc_dprior <- Csnippet("
   if (
     logsigma >= (log(0.01) - 10) && logsigma <= 10 &&  // Restrict logsigma

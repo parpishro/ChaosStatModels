@@ -5,6 +5,7 @@
 #'
 #' @return A Csnippet defining the parameter initialization.
 #' @importFrom pomp Csnippet
+library(pomp)
 pmcmc_init <- Csnippet("
   x = 0.5;
 ")
