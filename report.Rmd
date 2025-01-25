@@ -1,0 +1,1648 @@
+---
+title: "**Inference on Non-linear Chaotic Dynamical Systems**"
+subtitle: "*Implementation and Evaluation of Woods (2010) and Fasiolo et al. (2016) Methodology*"
+author: "Par Pishrobat"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  pdf_document:
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+# Environment setup
+knitr::opts_chunk$set(echo = TRUE)
+library(pomp)
+library(synlik)  # Synthetic likelihood inference 
+library(foreach)
+library(doParallel)
+library(parallel)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+library(coda)
+set.seed(123)
+
+# Load all R scripts in the "R" folder
+r_files <- list.files(path = "R", pattern = "\\.R$", full.names = TRUE)
+sapply(r_files, source)
+```
+
+## 1. Introduction
+
+In this report, I provide a comparative analysis of statistical inference methods for highly non-linear dynamical systems, building on the work of Woods (2010) and Fasiolo et al. (2016). Both papers address the challenges of parameter inference in chaotic and near-chaotic systems, focusing primarily on ecological and epidemiological models. I extend their methodologies to a neuroscience context by applying them to the stochastic Rulkov map, a model of neural spiking and bursting behavior. My goal is to evaluate the efficacy and feasibility of these approaches and assess their broader applicability beyond their original domains.
+
+Woods (2010) introduced the Synthetic Likelihood (SL) method as a solution for parameter inference in non-linear systems that exhibit chaotic or near-chaotic behavior in certain regions of their parameter space. In chaotic state, even small perturbations can lead to dramatically different trajectories and parameter estimates. Traditional likelihood-based inference fails in such scenarios due to the multi-modal nature of the likelihood surface. The SL method overcomes this challenge by reducing raw data into summary statistics that capture essential dynamic features, which eliminate the need to compute joint likelihoods. Woods demonstrated the effectiveness of SL in ecological systems,  with chaotic behaviour.
+
+Building on Woods’ work, Fasiolo et al. (2016) categorized inference methods for non-linear systems into two broad classes: Information Reduction (IR) methods, which includes SL and Approximate Bayesian Computation (ABC), and State Space (SS) models that incorporate hidden states, which includes particle filtering techniques such as Particle Markov Chain Monte Carlo (PMCMC) and Iterated Filtering (IF). They concluded that neither class of methods is universally superior; instead, their performance depends on the level of process noise. Fasiolo et al. recommended using IR methods for model development and preliminary checks, and SS methods for final inference when computationally feasible.
+
+In this report, I investigate the applicability, effectiveness, and computational feasibility of one representative method from each class, using the stochastic Rulkov map. Introduced by Nikolai F. Rulkov (2001) as a discrete-time model of spiking and bursting in neurons, the Rulkov map captures essential neural dynamics. Rulkov later introduced a stochastic version (2002) to account for the variability observed in biological neurons. The model comprises a fast subsystem, which governs spiking activity, and a slow subsystem, which modulates transitions between spiking and quiescent states. I focus exclusively on the fast subsystem, as it retains the essential non-linear and chaotic dynamics of the system while simplifying implementation.
+
+To assess the inference methods, I apply the SL method (representing the IR class) and the PMCMC method (representing the SS class) to the stochastic Rulkov map. I evaluate their accuracy in parameter estimation, robustness to varying levels of process noise, and computational feasibility. By selecting the stochastic Rulkov map, I provide an independent evaluation of the methods discussed by Woods and Fasiolo et al., extending their work to a novel dynamical system.
+
+The structure of this report is as follows: In Section 2, I introduce the stochastic Rulkov map and its dynamics, focusing on its chaotic and stochastic behavior. In Section 3, I discuss the challenges of parameter inference in chaotic systems and introduce the two classes of strategies, IR and SS, that address these challenges. Moreover, I present the SL and PMCMC methods in detail in subsection 3.1 and 3.2, respectively, including their application to the stochastic Rulkov map. In Section 4, I analyze and compare the performance of these methods, assessing their efficacy and robustness. Section 5 provides a discussion of the results in light of the claims made by Woods and Fasiolo et al. Finally, in Section 6, I conclude with recommendations on the suitability of each approach for inference in highly non-linear dynamical systems, and Section 7 lists the references I used to conduct this analysis and write the report.
+
+--------------
+
+## 2. Stochastic Rulkov Map
+
+Nikolai F. Rulkov introduced the Rulkov map for simulating the dynamics of excitable neurons (2001). Unlike traditional approaches such as the Hodgkin-Huxley equations, simulations of Rulkov map rely on discrete-time systems and are computationally efficient. Rulkov developed his two-dimensional, discrete-time map to captures the essential features of neuronal behavior using only a few variables (2001). The map evolves iteratively at each step to create a new state using the preceding state. Using the simple iterative structure complex neuronal phenomena, such as spiking and bursting, can be simulated efficiently.  The governing equations of the Rulkov map at each time steps are presented in Equation \eqref{eq:rulkov}.
+
+$$
+\begin{aligned}
+x_t \ &= \frac{\alpha}{1 + x_{t-1}^2} + y_{t-1}, \\ 
+y_t &= y_{t-1} - \mu(x_{t-1} - \xi)
+\end{aligned}\tag{1}\label{eq:rulkov}
+$$
+
+State variable $x_t$ represents the fast changes in membrane potential of a neuron at time $t$ and captures rapid spiking activity of the neuron. On the other hand, $y_t$ represents the slow recovery processes and reflect the gradual adjustment of ion channels between spikes. Together, $x_t$ and $y_t$ model the dynamics of the neuron's fast and slow subsystems. The parameter $\alpha$ controls the spiking behaviour, with larger values driving the system toward chaotic spiking or bursting. The small constant $\mu$, typically much less than 1, separates the timescales of the two subsystems and ensures that $y_t$ evolves much more slowly than $x_t$.  Lastly, parameter $\xi$ modulates the effect of $y_t$ on spiking patterns of $x_n$ by shifting the equilibrium of the slow subsystem. Since introduction of the Rulkov map, it has become a valuable tool in neuroscience research due to its simplicity and effectiveness in modelling neuronal dynamics (Shilnikov & Rulkov, 2003).
+
+In 2002, Rulkov extended his model to incorporate stochastic effects that account for the random fluctuations in biological neurons. In stochastic formulation of Rulkov map, randomness, referred to as **process noise**, is introduced exclusively into the fast subsystem. The fast subsystem is the primary driver of the rapid spiking activity and the most sensitive to external perturbations such as synaptic noise and ion channel dynamics. However, the gradual evolution of the slow subsystem is less influenced by high-frequency noise (Rulkov, 2002). As a result, the slow subsystem remains deterministic. The process noise, denoted by $p_t$, captures intrinsic and environmental variations in the system and is typically modelled as Gaussian white noise with zero mean and variance $\eta^2$. In addition to process noise, experimental setups also encounter **measurement noise**, which arises from observational limitations. The measurement noise, denoted by $e_t$, is similarly modeled as Gaussian white noise with zero mean and variance $\sigma^2$. The resulting equations for the stochastic fast subsystem of the Rulkov map are presented in Equation \eqref{eq:stochrulkov}. Here, the observation trajectory, $x_t^{(obs)}$ is denoted by $z_t$ for simplicity.
+
+
+
+$$
+\begin{aligned}
+x_t &= \frac{\alpha}{1 + x_{t-1}^2} + y_{t-1} + p_t, \quad &p_t \sim \mathcal{N}(0, \eta) \\
+z_t &= x_t^{(obs)} = x_t + e_t, \quad &e_t \sim  \mathcal{N}(0, \sigma)
+\end{aligned}\tag{2}\label{eq:stochrulkov}
+$$
+
+Although both noise terms appear additive in the equations, their effects on the system differ fundamentally. Process noise exerts a non-linear effect because it influences the $t$-th state not only through direct addition but also indirectly by contributing to the state at step $t-1$. As a result, the effect of process noise is non-linear, whereas, the measurement noise is purely additive and affects only the current observed state $z_t$. 
+
+Stochasticity enables the model to capture the irregular spiking and bursting in real neurons. Moreover, random perturbations may disrupt the timing of neuronal events (Rulkov, 2002). Therefore, the stochastic Rulkov map offers a more accurate representation of the inherent variability in neuronal dynamics (Ibarz et al., 2011). The stochastic version of the map has been used to explore the effect of noise on neuronal dynamics and information processing (Lindner et al., 2004). For example, Pikovsky and Kurths have shown that noise can help detect weak signals through stochastic resonance by enhancing the system response to sub-threshold inputs (1997).
+
+The fast subsystem of the stochastic Rulkov map drives the chaotic dynamics of the system. The nonlinear term in the fast subsystem destabilizes fixed points at $\alpha > 4$, giving rise to chaotic attractors (Rulkov, 2002). This behavior is characterized by sensitivity to initial conditions and aperiodic trajectories that are defining features of chaos in the system. In this report, I focus on the fast subsystem as the primary source of chaotic dynamics within specific regions of the parameter space. Furthermore, the presence of noise complicate the inference. Noise can obscure or interact with underlying system, which might prevent separating deterministic dynamics from stochastic effects. These factors make the fast subsystem of the stochastic Rulkov map an ideal test case for evaluating inference methods tailored to highly non-linear dynamical systems.
+
+
+
+
+
+```{r plot-divergence, echo=FALSE, fig.cap="*Simulated trajectories showing divergence in three setups: different initial states, different ($\\alpha$) values, and small randomness. Each plot overlays two trajectories (navy and orange) to highlight how small differences in initial conditions, parameter values, or stochastic perturbations lead to divergent behaviors, reflecting the chaotic dynamics of the system.*\\label{fig:divergence}", fig.height=3.5, fig.width=6, fig.pos="H" }
+# =======================================
+# Define the POMP Object for Rulkov Map
+# =======================================
+# This block defines the stochastic Rulkov map using a POMP object.
+pomp_object <- pomp::pomp(
+  data       = data.frame(time = 1:100, obs = NA),     # Placeholder for simulation data
+  times      = "time",                                 # Time variable in the data
+  t0         = 0,                                      # Initial time
+  rinit      = function(...) c(x = 0.5),               # Initialize state variable
+  rprocess   = discrete_time(pmcmc_step, delta.t = 1), # Transition dynamics
+  rmeasure   = pmcmc_rmeasure,                         # Measurement noise function
+  params     = c(
+    alpha      = 4.2,                                  # Base parameter alpha
+    logeta     = log(0.01),                            # Log of process noise variance
+    logsigma   = log(0.01)                             # Log of measurement noise variance
+  ),
+  statenames = c("x"),                                 # State variable names
+  paramnames = c("alpha", "logeta", "logsigma")        # Parameter names
+)
+
+# ===========================================
+# Simulations for Three Scenarios
+# ===========================================
+
+# Scenario 1: Different initial states, zero randomness
+sim_scenario1 <- pomp::simulate(
+  pomp_object,
+  params = c(alpha = 4.2, logeta = -Inf, logsigma = -Inf),  # Zero randomness
+  nsim   = 2,                                               # Two trajectories
+  rinit  = function(...) c(x = runif(1, min = -1, max = 1)) # Different initial states
+)
+
+# Scenario 2: Different alpha, same initial state, zero randomness
+sim_scenario2 <- lapply(c(4.2, 4.3), function(alpha_val) {
+  pomp::simulate(
+    pomp_object,
+    params = c(alpha = alpha_val, logeta = -Inf, logsigma = -Inf),  # Zero randomness
+    nsim   = 1                                                      # Single trajectory
+  )
+})
+
+# Scenario 3: Small randomness, same initial state and parameters
+sim_scenario3 <- pomp::simulate(
+  pomp_object,
+  params = c(alpha = 4.2, logeta = log(0.01), logsigma = log(0.01)), # Small randomness
+  nsim   = 2                                                         # Two trajectories
+)
+
+# ===========================================
+# Prepare Data for Visualization
+# ===========================================
+
+# Helper function to extract and format simulation data
+extract_simulation_data <- function(simulations, label) {
+  do.call(rbind, lapply(1:length(simulations), function(i) {
+    sim_data            <- as.data.frame(t(simulations[[i]]@data)) # Extract data
+    sim_data$time       <- 1:nrow(sim_data)                        # Add time
+    sim_data$simulation <- paste0("Sim ", i)                       # Label trajectories
+    sim_data$scenario   <- label                                   # Add scenario label
+    return(sim_data)
+  }))
+}
+
+# Format data for each scenario
+data_scenario1 <- extract_simulation_data(sim_scenario1, "Different Initial States")
+data_scenario2 <- do.call(rbind, lapply(1:2, function(i) {
+  sim_data            <- as.data.frame(t(sim_scenario2[[i]]@data)) # Extract data
+  sim_data$time       <- 1:nrow(sim_data)                          # Add time
+  sim_data$simulation <- paste0("Sim ", i)                         # Label trajectories
+  sim_data$scenario   <- "Different Alpha"                         # Add scenario label
+  return(sim_data)
+}))
+data_scenario3 <- extract_simulation_data(sim_scenario3, "Small Randomness")
+
+# Combine all data into one data frame for grouped plotting
+all_data <- rbind(data_scenario1, data_scenario2, data_scenario3)
+
+# =====================================
+# Plot Simulated Trajectories
+# =====================================
+
+# Create overlayed plots for each scenario
+overlay_plots <- lapply(unique(all_data$scenario), function(scen) {
+  scenario_data <- all_data[all_data$scenario == scen, ]
+  ggplot(scenario_data, aes(x = time, y = obs, color = simulation)) +
+    geom_line() +
+    scale_color_manual(values = c("Sim 1" = "navy", "Sim 2" = "orange")) +
+    labs(title = scen) +
+    xlab(if(scen == "Small Randomness") "time" else element_blank()) +
+    ylab(if(scen == "Different Alpha") "x (fast subsystem)" else element_blank()) +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    ylim(range(all_data$obs))          # Ensure consistent y-axis scale
+})
+
+# Combine plots with shared x-axis, y-axis, and legend
+grid.arrange(grobs = overlay_plots, layout_matrix = rbind(c(1), c(2), c(3)))
+```
+
+
+To investigate the chaotic and stochastic dynamics of the Rulkov map, I focused on the fast subsystem while fixing the slow subsystem at $y = -2.8$. I chose the fixed value based on Rulkov’s original analysis and my examination of the slow subsystem. I selected parameter values of $\alpha = 4.2$, as chaotic behaviour emerges in this region. 
+
+I conducted three sets of simulations and plotted the results as overlaid trajectories in Figure \ref{fig:divergence} to illustrate the chaotic dynamics of the system. In each plot, two trajectories (navy and orange) are overlaid to demonstrate how they evolve over time. In the first simulation scenario, I kept the parameters constant with zero noise ($\eta = 0$ and $\sigma = 0$) but introduced different initial states ($x_0$) to show its effect on trajectories in a deterministic system. In the second scenario, I varied the parameter $\alpha$ slightly (from 4.2 to 4.3) while keeping the initial states the same at ($x_0 = 0.5$) and noise levels at zero. In the third scenario, I introduced small process and measurement noise while using identical initial states and parameters. All three plots show diverging trajectories and highlight the chaotic nature of the system. Even minimal differences in initial conditions, parameters, or noise, lead to drastically different outcomes and complicate long-term prediction and parameter inference.
+
+```{r lypunov, include=FALSE}
+# =======================================
+# Compute Lyapunov Exponent for Rulkov Map
+# =======================================
+# This section computes the largest Lyapunov exponent for the deterministic 
+# simulation (alpha = 4.2, eta = sigma = 0, x0 = 0.5, y = -2.8) using the 
+# previously generated trajectory from the deterministic setup.
+
+# Define the Lyapunov exponent computation function
+lyapunov_exponent <- function(x_series, alpha) {
+  # Compute the derivative of the Rulkov map with respect to x
+  f_prime <- function(x) {
+    -2 * alpha * x / (1 + x^2)^2
+  }
+  # Calculate derivatives along the trajectory
+  derivatives <- f_prime(x_series)
+  # Exclude zero derivatives (to avoid log(0))
+  valid <- which(derivatives != 0)
+  # Compute the mean of the log of absolute derivatives
+  lambda <- mean(log(abs(derivatives[valid])))
+  return(lambda)
+}
+
+# Extract the deterministic simulation data
+# (from the "Different Initial States" scenario with alpha = 4.2)
+deterministic_data <- data_scenario1[data_scenario1$simulation == "Sim 1", ]
+
+# Compute the Lyapunov exponent for the deterministic trajectory
+lambda <- lyapunov_exponent(deterministic_data$obs, alpha = 4.2)
+
+```
+
+
+I also computed the largest Lyapunov exponent to quantify the chaotic dynamic of the systems. I simulated a deterministic setup ($\alpha = 4.2$, $\eta = 0$, $\sigma = 0$, $x_0 = 0.5$, $y = -2.8$) and estimated the largest Lyapunov exponent to be approximately `r round(lambda, 3)`. The positive sign indicates exponential divergence of trajectories and sensitivity to initial conditions, which confirms the chaotic dynamic of the system.
+
+
+The bifurcation diagram in Figure \ref{fig:bifurkation} visualizes the steady-state values of $\mathbf{x} = \{x_t\}_{t=1}^T$ in the fast subsystem of the Rulkov map. The system exhibits periodic behaviour for lower values of $\alpha$ (approximately $0 \leq \alpha \leq 3$), where $x$ alternates predictably between fixed points or a small number of periodic orbits. In contrast, the diagram shows a clear transition to aperiodic behaviour for higher $\alpha$ values, reflecting the unpredictable and non-repeating dynamics of $\mathbf{x}$. The chaotic regime is particularly pronounced for $\alpha > 4$, where the steady-state values form dense fractal-like scattered patterns.
+
+
+
+```{r plot-bifurkation, echo=FALSE, fig.cap="*Bifurcation diagram for the fast subsystem of the Rulkov map, showing the steady-state values of (x) as the parameter ($\\alpha$) varies. The diagram highlights transitions from periodic behavior at lower ($\\alpha$) values to chaotic dynamics at higher ($\\alpha$) values, illustrating the system's sensitivity to parameter changes and the emergence of complex, chaotic behavior.*\\label{fig:bifurkation}", fig.height=3.5, fig.width=6, fig.pos="H" }
+# =======================================
+# Generate Bifurcation Diagram for Rulkov Map
+# =======================================
+# This section generates a bifurcation diagram by sweeping alpha values 
+# and observing the behavior of the fast subsystem of the deterministic Rulkov map.
+
+# Define the range of alpha values to sweep
+alpha_values <- seq(0, 10, by = 0.05)  # Sweep alpha values in the chaotic region
+bifurcation_data <- data.frame()          # Initialize an empty data frame to store results
+
+# Loop through each alpha value to simulate the system
+for (alpha_val in alpha_values) {
+  # Simulate the system with the current alpha value
+  sim_result <- pomp::simulate(
+    pomp_object,
+    params = c(alpha = alpha_val, logeta = -Inf, logsigma = -Inf), # Deterministic setup
+    nsim = 1
+  )
+  
+  # Extract the simulation data (last 100 observations are the entire dataset in this case)
+  sim_data <- as.data.frame(t(sim_result@data))
+  
+  # Combine the results with the current alpha value
+  bifurcation_data <- rbind(
+    bifurcation_data,
+    data.frame(alpha = rep(alpha_val, nrow(sim_data)), x = sim_data$obs)
+  )
+}
+
+# =======================================
+# Plot Bifurcation Diagram
+# =======================================
+# This plot visualizes the steady-state behavior of the Rulkov map
+# across different alpha values, highlighting transitions in dynamics.
+
+library(ggplot2)
+ggplot(bifurcation_data, aes(x = alpha, y = x)) +
+  geom_point(size = 0.5, alpha = 0.6, color = "black") +
+  labs(
+    title = "Bifurcation Diagram for Rulkov Map",
+    x = expression(alpha),  # Label for alpha
+    y = "x (Fast Subsystem)" # Label for x
+  ) +
+  theme_minimal()
+
+```
+
+
+I applied spectral analysis by moving the observed time series into the frequency domain, using the same deterministic setup employed in the Lyapunov exponent calculations to simulate the trajectory. Afterward, I used the Fast Fourier Transform (FFT) to obtain the power spectrum, shown in Figure \ref{fig:spectral}. Multiple peaks at distinct frequencies suggest several interacting oscillatory modes, ndicating the aperiodic nature of the dynamics.
+
+
+```{r plot-spectral, echo=FALSE, fig.cap="*Power spectrum of the fast subsystem of the Rulkov map (($\\alpha = 4.2$), ($\\eta = 0$), ($\\sigma = 0$)), showing the distribution of power across frequencies. The broad spectrum with multiple peaks indicates the presence of interacting oscillatory modes and the aperiodic nature of the system's dynamics, consistent with chaotic behavior.*\\label{fig:spectral}", fig.height=3.5, fig.width=6, fig.pos="H" }
+# =======================================
+# Perform Spectral Analysis for Rulkov Map
+# =======================================
+# This section computes and plots the power spectrum of the deterministic 
+# trajectory (alpha = 4.2, eta = 0, sigma = 0, x0 = 0.5, y = -2.8) to analyze
+# the frequency components of the fast subsystem's dynamics.
+
+# Extract the deterministic simulation data (used previously for Lyapunov exponent)
+deterministic_data <- data_scenario1[data_scenario1$simulation == "Sim 1", ]
+
+# Compute the power spectrum
+# - Apply Fast Fourier Transform (FFT) to the trajectory
+# - Compute the squared magnitude of the FFT to obtain the power spectrum
+power_spectrum <- abs(fft(deterministic_data$obs))^2
+
+# Compute the frequency components
+# - Frequencies are normalized by the length of the trajectory
+freq <- seq(0, length(power_spectrum) - 1) / length(power_spectrum)
+
+# =======================================
+# Plot the Power Spectrum
+# =======================================
+# This plot visualizes the frequency components of the trajectory,
+# highlighting any dominant periodicities in the dynamics.
+
+library(ggplot2)
+ggplot(data.frame(Frequency = freq, Power = power_spectrum), aes(x = Frequency, y = Power)) +
+  geom_line(color = "navy") +
+  labs(
+    title = "Power Spectrum of x (Fast Subsystem)",
+    x = "Frequency",
+    y = "Power"
+  ) +
+  theme_minimal()
+```
+
+
+Next, I ran simulations with varying levels of process noise ($\eta$) and measurement noise ($\sigma$), keeping $\alpha = 4.2$ and the initial conditions unchanged. The grid of plots in Figure \ref{fig:noise} shows that, at low noise ($\eta = 0.005$, $\sigma = 0.005$), the trajectories closely match the deterministic chaotic behavior. As noise grows, trajectories deviate more: higher process noise ($\eta = 0.5$) introduces large fluctuations that distort the attractor, while higher measurement noise ($\sigma = 0.5$) adds considerable observational scatter. These results illustrate how increasing noise amplifies randomness and masks the system’s underlying deterministic structure.
+
+
+
+```{r plot-noise, echo=FALSE, warning=FALSE, fig.cap="*Trajectories of the fast subsystem of the Rulkov map for varying levels of process noise ($\\eta$) and measurement noise ($\\sigma$) while keeping ($\\alpha = 4.2$) and initial conditions fixed. The plots demonstrate how increasing noise levels amplify variability, with high process noise distorting the chaotic attractor and high measurement noise introducing observational randomness.*\\label{fig:noise}", fig.height=3, fig.width=6, fig.pos="H" }
+# =======================================
+# Exploring the Effect of Noise on Trajectories
+# =======================================
+# This section simulates the fast subsystem of the Rulkov map under various levels 
+# of process noise (η) and measurement noise (σ) to analyze the impact of noise 
+# on the system's dynamics.
+
+# Define noise levels to explore
+eta_values <- c(0.005, 0.05, 0.5)   # Process noise levels (η)
+sigma_values <- c(0.005, 0.05, 0.5) # Measurement noise levels (σ)
+
+# Initialize storage for plots
+noise_effects_plots <- list()
+
+# Define fixed y-axis limits
+y_limits <- c(-3, 3) 
+
+# Loop over combinations of process noise (η) and measurement noise (σ)
+plot_index <- 1
+for (eta in eta_values) {
+  for (sigma in sigma_values) {
+    # Simulate the system with the current noise levels
+    sim_result <- pomp::simulate(
+      pomp_object,
+      params = c(alpha = 4.2, logeta = log(eta), logsigma = log(sigma)),
+      nsim = 1
+    )
+    
+    # Extract simulation data
+    sim_data <- as.data.frame(t(sim_result@data))
+    sim_data$time <- 1:nrow(sim_data) # Add time column for plotting
+    
+    # Generate a time series plot for the current noise levels
+    noise_effects_plots[[plot_index]] <- ggplot(sim_data, aes(x = time, y = obs)) +
+      geom_line(color = "navy") +
+      ylim(y_limits) + # Set the same y-axis limits for all plots
+      labs(
+        title = bquote(eta ~ "=" ~ .(eta) ~ "," ~ sigma ~ "=" ~ .(sigma)), # Correct display of Greek letters
+        x = if(eta == 0.5 & sigma == 0.05) "x (Fast Subsystem)" else element_blank() ,
+        y = if(eta == 0.05 & sigma == 0.005) "Time" else element_blank() # Properly labeled y-axis
+      ) +
+      theme_minimal()  +
+      theme(plot.title = element_text(size = 7)) # Set title size
+      
+    
+    plot_index <- plot_index + 1
+  }
+}
+
+# =======================================
+# Arrange and Display Noise Effect Plots
+# =======================================
+# Combine all plots into a grid with the number of columns matching the σ levels
+gridExtra::grid.arrange(grobs = noise_effects_plots, ncol = length(sigma_values))
+
+```
+
+These analyses confirm that the Rulkov map demonstrates chaos, aperiodicity, and pronounced sensitivity to initial conditions, parameters, and randomness, making it a strong candidate for inference on its dynamics. Therefore, I will use the fast subsystem to investigate the inference method for chaotic systems. To do so, I set the initial value at $x_0 = 0.5$, fixed the slow subsystem at $y_0 = -2.8$, and defined a parameter grid over $\alpha$, $\eta$, and $\sigma$ to sample a broad set of system conditions. Specifically, $\alpha \in \{ 2, 4, 4.5, 5, 6 \}$ spans spiking and bursting regimes, $\eta \in \{ 0.01, 0.1, 0.5, 1 \}$ captures wide range of process noise, and $\sigma \in \{ 0.01, 0.1, 0.5\}$ spans low, moderate, and high measurement noise. This grid results in 60 unique parameter configurations. Comparison across the grid, enables a thorough test of parameter estimation methods under realistic conditions that align with prior neuronal modelling research (Rulkov 2001, 2002; Lindner et al. 2004).
+
+
+
+```{r ground truth parameter grid, include=FALSE}
+# Define the grid of parameters to evaluate
+param_grid <- as.data.frame(
+  expand.grid(
+    alpha    = c(2, 4, 4.5, 5, 6),
+    logeta   = log(c(0.01, 0.1, 0.5, 1)),
+    logsigma = log(c(0.01, 0.1, 0.5))
+    )
+  )
+n_params <- nrow(param_grid)
+```
+
+
+--------------
+
+## 3. Inference for Chaotic Systems
+
+The sensitivity of the system to initial conditions, parameter perturbations, and noise leads to challenging inference on chaotic systems. Small differences grow exponentially over time, impairing predictability and complicating inference (Ott, 2002). Traditional approaches that assume smooth, convex likelihood surfaces break down. Chaotic systems often produce irregular likelihood landscapes with multiple peaks, sharp ridges, and flat regions, which impede standard optimization and yield unreliable parameter estimates (Strogatz, 1994). Moreover, in the stochastic Rulkov map, small parameter or initial-state changes can cause significantly different trajectories, reducing data informativeness and increasing uncertainty in parameter recovery.
+
+Figure \ref{fig:contour} illustrates these challenges by plotting the log-likelihood surface of the Rulkov map in terms of $\alpha$ and $\eta$. For this figure, I varied $\alpha$ from 1 to 10 and $\eta$ logarithmically from 0.01 to 1 while holding $\sigma$ fixed, then used particle filtering to compute log-likelihoods at each parameter combination. The resulting 2D contour plot shows a highly irregular surface with multiple peaks, valleys, and abrupt changes in contour lines that are evidence of the system sensitivity. Even minor parameter shifts produce distinct behaviors, generating a multimodal, non-smooth likelihood function. 
+
+
+```{r param grid for loglik surface, include=FALSE}
+# Define the parameter grid
+param_loglik <- as.data.frame(expand.grid(
+  alpha = seq(1, 10, by = 1), 
+  logeta = log(seq(0.01, 1, by = 0.1)), # Avoid log(0)
+  logsigma = log(0.001)                       # Fixed logsigma
+))
+```
+
+
+```{r compute loglik, eval=FALSE, include=FALSE}
+log_lik_values <- numeric(nrow(param_loglik))
+
+# Loop over parameter combinations
+for (i in seq_len(nrow(param_loglik))) {
+  true_params <-   c(
+    "alpha"       = param_loglik[i, "alpha"], 
+    "logeta"      = param_loglik[i, "logeta"], 
+    "logsigma"    = param_loglik[i, "logsigma"]
+  )
+  
+  # Create the pomp object for the current parameter combination
+  pomp_object <- pomp::pomp(
+    data       = data.frame(time = 1:100, obs = NA),
+    times      = "time",
+    t0         = 0,
+    rinit      = pmcmc_init,
+    rprocess   = discrete_time(pmcmc_step, delta.t = 1),
+    rmeasure   = pmcmc_rmeasure,
+    dmeasure   = pmcmc_dmeasure,
+    dprior     = pmcmc_dprior,
+    params     = true_params,
+    statenames = c("x"),
+    paramnames = c("alpha", "logeta", "logsigma")
+  )
+  
+  # Simulate the system and compute the log-likelihood
+  # Simulate observations
+  pomp_object <- simulate(pomp_object, nsim = 1, userdata = list(as.data.frame = TRUE))
+  pf <- pfilter(pomp_object, params = true_params, Np = 100)  # Perform particle filtering
+  log_lik_values[i] <- logLik(pf)                             # Extract log-likelihood          
+}
+save(log_lik_values, file = "loglik.RData")
+```
+
+
+```{r plot-contour, echo=FALSE, fig.cap="*Log-likelihood surface (contour plot) for the Rulkov map, showing the relationship between $\\alpha$ (spiking behavior) and $\\eta$ (process noise) with fixed $\\sigma$ (measurement noise). The irregular contours illustrate the multimodal and non-smooth nature of the likelihood surface, highlighting the challenges of parameter inference in chaotic systems.*\\label{fig:contour}", fig.height=3.5, fig.width=6, fig.pos="H" }
+# =======================================
+# Reshape Data for Log-Likelihood Surface
+# =======================================
+# Combine the parameter grid and log-likelihood values
+load(file = "data/loglik.RData")
+param_loglik$logLik <- log_lik_values
+
+# Reshape data for contour and surface plots
+plot_data         <- dcast(param_loglik, alpha ~ logeta + logsigma, value.var = "logLik")
+
+# Extract unique combinations of logeta and logsigma
+y_labels          <- names(plot_data)[-1] # Exclude the alpha column
+logeta_logsigma   <- do.call(rbind, strsplit(y_labels, split = "_")) # Split names by "_"
+eta_values        <- exp(as.numeric(logeta_logsigma[, 1])) # Extract logeta part
+sigma_values      <- exp(as.numeric(logeta_logsigma[, 2])) # Extract logsigma part
+
+unique_eta        <- sort(unique(eta_values))
+
+# Ensure valid z-matrix for plotting
+z_matrix <- matrix(
+  data  = param_loglik$logLik,                    # Log-likelihood values
+  nrow  = length(plot_data$alpha),              # Rows correspond to alpha
+  ncol  = length(unique_eta),                # Columns correspond to unique logeta
+  byrow = TRUE                                 # Fill row-wise
+)
+
+# =======================================
+# 2D Contour Plot
+# =======================================
+# Generate a contour plot of the log-likelihood surface
+contour(
+  x    = plot_data$alpha,                         # Unique alpha values
+  y    = unique_eta,                           # Unique, sorted logeta values
+  z    = z_matrix,                                # Reshaped z matrix
+  xlab = "Alpha", 
+  ylab = expression(eta), 
+  main = "Log-Likelihood Surface (Contour)"
+)
+```
+
+I also generated a 3D plot of the log-likelihood surface over a grid of $\alpha$ and $\eta$ values (with $\sigma$ fixed at close to zero) in Figure \ref{fig:3d} to examine the effect of noise on likelihood. Again, simulations and particle filtering reveal a complex surface characterized by sharp peaks, valleys, and discontinuities. The traditional optimization methods that assume regular likelihood shapes fail in this context,  signifying the need for robust inference strategies that can handle erratic likelihood landscapes.
+
+```{r plot-3d, echo=FALSE,  fig.cap="**Log-Likelihood Surface:** *3D Perspective for the fast subsystem of the Rulkov map across $\\alpha$ and $\\eta$, with $\\sigma$ held constant. The surface highlights the multimodal and non-smooth nature of the likelihood landscape, characterized by sharp peaks, valleys, and discontinuities, illustrating the interplay between chaotic dynamics and noise.*\\label{fig:3d}", fig.height=3.5, fig.width=5}
+# =======================================
+# 3D Perspective Plot
+# =======================================
+# Generate a 3D perspective plot of the log-likelihood surface
+persp(
+  x     = plot_data$alpha,     # Unique alpha values (x-axis)
+  y     = unique_eta,          # Unique, sorted eta values (y-axis)
+  z     = z_matrix,            # Reshaped z matrix
+  xlab  = "$\\alpha$",         # Use expression for Greek alpha
+  ylab  = expression(eta),           # Use expression for Greek eta
+  zlab  = "Log-Likelihood",    # Standard text for z-axis
+  theta = 30,                  # Viewing angle (horizontal rotation)
+  phi   = 30,                  # Viewing angle (vertical tilt)
+  col   = "lightblue"          # Color for the surface
+)
+```
+
+
+Bifurcations adds extra difficulty for inference. In the Rulkov map, for instance, bifurcation analysis reveals that small changes in parameters can provoke abrupt, qualitative shifts in long-term behaviour from periodic to chaotic regimes. Such shifts create discontinuities in parameter space, resulting in non-smooth likelihood surfaces and unstable trajectories that conflict with the assumptions underlying standard gradient-based methods (Schuster, 1988). Moreover, the structure of chaotic attractors, with their strange attractors and fractal geometry, adds difficulty by confining trajectories to limited regions of phase space (Ott, 2002; Kantz & Schreiber, 2004). In addition, non-stationarity and short prediction horizons increase inference complexity in chaotic systems. Chaotic regimes may change unpredictably over time, violating the stationarity assumptions of traditional statistical methods (Abarbanel, 1996), while small parameter variations near bifurcation points can yield qualitatively different behaviors that undermine stable model assumptions. As demonstrated by the spectral and noise analyses of the Rulkov map, the interplay of non-stationarity, high-dimensional dynamics, and noise produces a set of challenges that can overwhelm conventional methods. Fasiolo et al. categorized the strategies to overcome the challenges of inference on chaotic systems into two broad class: Information Reduction (IR) and State Space (SS) modelling framework (2016).
+
+he Information Reduction (IR) approach compress raw data into a set of low-dimensional summary statistics that capture the essential dynamic features, while discarding noise and irrelevant variability. This reduction alleviates the computational strain associated with intractable integrals and eases the inference process. Methods under the IR umbrella include Approximate Bayesian Computation (ABC) and Synthetic Likelihood (SL). ABC infers the posterior distribution by matching summary statistics from both simulated and observed data, thereby eliminating the need for an explicit likelihood function (Beaumont et al., 2002). In contrast, SL assumes a parametric form, commonly a multivariate Gaussian, to model the distribution of summary statistics, which allows for likelihood-based inference even when the original likelihood is intractable (Wood, 2010). These IR methods prove especially useful in preliminary analyses and model development for chaotic systems, delivering both computational efficiency and robustness.
+
+The SS approach explicitly models a system’s hidden states and their evolution over time, offering flexibility for capturing complex dynamics. Originally developed for linear systems (Kalman, 1960), SS modeling has been extended to accommodate nonlinear and stochastic scenarios, making it applicable to chaotic dynamics. SS class include methods such as Iterative Filtering (IF) and Particle Markov Chain Monte Carlo (PMCMC). IF refines parameter estimates iteratively by isolating state dynamics from noise, whereas PMCMC integrates particle filtering with Markov Chain Monte Carlo to approximate the joint posterior of states and parameters (Andrieu et al., 2010). SS methods perform well in high-dimensional, nonlinear contexts and provide robust inference even when likelihood surfaces are irregular. In the following sections, I introduce the SL method as an example of the IR approach (Section 4) and the PMCMC method as an example of the SS approach (Section 5).
+
+
+## 4. Synthetic Likelihood Method
+
+
+The Synthetic Likelihood (SL) method is a representative approach within the Information Reduction (IR) framework, addressing the challenges of parameter inference in chaotic systems by leveraging low-dimensional summary statistics. I will explain the method and its implementation using the fast subsystem of stochastic Rulkov map (presented in Equation \eqref{eq:stochrulkov}). Let $\mathbf{z} = \{z_1, z_2, \dots, z_T\}$ represent the observed trajectory of the fast subsystem, and let $\mathbf{s} = S(\mathbf{z}) \in \mathbb{R}^d$ denote the corresponding summary statistic given the statistic function $S(.)$ and $d \ll T$. The summary statistic vector $\mathbf{s}$ must capture the key features of the system’s chaotic dynamics, while filtering out extraneous noise and variability. This dimensionality reduction smooths the irregularities of the original likelihood $L(\mathbf{z} \mid \boldsymbol{\theta})$ to a much smoother synthetic likelihood $L(\mathbf{s} \mid \boldsymbol{\theta})$, mitigating pathologies common in chaotic systems and facilitating inference. For complex nonlinear systems like the stochastic Rulkov map, exact sufficiency of $\mathbf{s}$ for the parameters $\boldsymbol{\theta}$ is generally unattainable. However, carefully chosen summary statistics can approximate sufficiency and stabilize parameter estimation. 
+
+
+I specifically included the mean and the mean-median difference to capture the central tendency and asymmetry in the observed data. I also incorporated temporal dependencies using autocorrelation features up to lag 11, and accounted for nonlinear autoregressive terms using higher-order interactions. Additionally, I considered the count of zero crossings to represent oscillatory behavior, as well as the proportion of power in low-frequency bands from the power spectrum, which emphasizes the dominant system frequencies. Partial autocorrelations at selected lags provided further insights into dependencies beyond what simpler measures could capture. Although I explored other statistics, such as skewness, kurtosis, recurrence density, and inter-spike intervals, they were ultimately excluded after empirical evaluation. The features I selected, which align with Woods' recommendations (2010), strike a balance between capturing essential dynamics and maintaining computational efficiency for robust parameter inference.
+
+The SL method assumes a parametric model for the distribution of the summary statistics, typically a multivariate Gaussian, and estimates its parameters using simulations. The presence of summary statistics and and at some cases regression coefficients promotes normality assumption. By approximating the likelihood in the reduced space of $\mathbf{s}$, the SL method avoids the need for direct evaluation of the high-dimensional and irregular likelihood surface. The mean vector and the covariance matrix of the summary statistics, $\boldsymbol{\mu}_{\boldsymbol{\theta}}$ and $\boldsymbol{\Sigma}_{\boldsymbol{\theta}} \in \mathbb{R}^{d \times d}$ respectively, depend on $\boldsymbol{\theta}$ and are unknown.
+
+
+$$
+\mathbf{s} \mid \boldsymbol{\theta} \sim \mathcal{N}(\boldsymbol{\mu}_{\boldsymbol{\theta}}, \boldsymbol{\Sigma}_{\boldsymbol{\theta}}) \tag{3}\label{eq:stats}
+$$
+
+To approximate them, $N$ independent datasets $\mathbf{x}^{(i)}$ are simulated given a $\boldsymbol{\theta}$. Then, the summary statistic derived from each simulated dataset and the sample mean and covariance of the summary statistics are computed.
+
+$$
+\begin{aligned}
+\mathbf{s}_i \quad &= S(\mathbf{x}^{(i)}) ,  &\mathbf{s} \in \mathbb{R}^d \\ 
+\hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}} \ \ &= \frac{1}{N}\sum_{i=1}^N \mathbf{s}_i, \quad  &\boldsymbol{\mu}_{\boldsymbol{\theta}} \in \mathbb{R}^d \\ 
+\hat{\boldsymbol{\Sigma}}_{\boldsymbol{\theta}} \ \ &= \frac{1}{N-1}\sum_{i=1}^N (\mathbf{s}_i - \hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}})(\mathbf{s}_i - \hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}})^T,  &\boldsymbol{\Sigma}_{\boldsymbol{\theta}} \in \mathbb{R}^{d \times d}
+\end{aligned}\tag{4}\label{eq:sims}
+$$
+
+
+
+The synthetic conditional probability is then approximated as multivariate normal and its corresponding log-likelihood can be approximated.
+
+$$
+\begin{aligned}
+p(\mathbf{s}_0 \mid \boldsymbol{\theta}) \quad &\approx \mathcal{N}(\mathbf{s}_0; \hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}}, \hat{\boldsymbol{\Sigma}}_{\boldsymbol{\theta}}), \\ 
+\implies \log p(\mathbf{s}_0 \mid \boldsymbol{\theta}) &\approx -\frac{1}{2}(\mathbf{s}_0 - \hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}})^T \hat{\boldsymbol{\Sigma}}_{\boldsymbol{\theta}}^{-1}(\mathbf{s}_0 - \hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}}) - \frac{1}{2}\log|\hat{\boldsymbol{\Sigma}}_{\boldsymbol{\theta}}| - \frac{d}{2}\log(2\pi).
+\end{aligned}\tag{5}\label{eq:loglik}
+$$
+
+
+Given a prior $p(\boldsymbol{\theta})$, the posterior distribution is expressed in terms of the prior and the likelihood (Eq. \eqref{eq:poster}. Sampling from this posterior is typically performed using Markov Chain Monte Carlo (MCMC), where $\hat{\boldsymbol{\mu}}_{\boldsymbol{\theta}}$ and $\hat{\boldsymbol{\Sigma}}_{\boldsymbol{\theta}}$ are updated iteratively through on-the-fly simulations or cached simulations for computational efficiency.
+
+$$
+p(\boldsymbol{\theta} \mid \mathbf{s}_0) \propto p(\mathbf{s}_0 \mid \boldsymbol{\theta})p(\boldsymbol{\theta}). \tag{6}\label{eq:poster}
+$$
+
+
+The success of the SL method depends critically on the choice of summary statistics. We need to balance reducing dimensionality with preserving the essential chaotic dynamics of the system. For the stochastic Rulkov map, especially its fast subsystem, effective summaries might include sample partial autocorrelations, spectral densities, or even descriptors of bifurcations. Although these features can capture intrinsic dynamics and support robust inference, they did not improve performance in the current analysis. Therefore, fine-tuning complex statistics is necessary to enhance accuracy of inference. By smoothing the irregular likelihood landscape and emphasizing dominant dynamic features, the SL method offers a practical and computationally efficient solution for parameter estimation in highly nonlinear, chaotic systems like the Rulkov map.
+
+
+
+
+
+
+```{r sl method, eval=FALSE, include=FALSE}
+# Initialize an empty list to store synthetic likelihood results for each parameter set
+results_sl <- list()
+
+# Loop over each parameter combination in the grid
+for (i in seq_len(n_params)) { 
+  # Extract the true parameters for the current iteration from the parameter grid
+  true_pars <- c(
+    "alpha"    = param_grid[i, "alpha"], 
+    "logeta"   = param_grid[i, "logeta"], 
+    "logsigma" = param_grid[i, "logsigma"]
+  )
+  
+  # Record the start time for measuring computational cost
+  start_time <- Sys.time()  # Start timer
+  
+  # Create a synthetic likelihood object with the provided simulator and summary statistics functions,
+  # and set the true parameters along with additional simulation arguments.
+  sl_object <- synlik::synlik(
+    simulator = sl_simulate,     # Function to simulate data from the model
+    summaries = sl_stats,        # Function to compute summary statistics
+    param     = true_pars,       # True parameters for the simulation
+    extraArgs = list(            # Additional arguments for the simulation
+      "nObs"     = 100,          # Number of observations to simulate
+      "nBurn"    = 0,            # Burn-in period (no burn-in in this case)
+      "randInit" = FALSE,        # Do not use random initialization
+      "initVals" = c(0.5)        # Initial values for the simulation
+    )
+  )
+  
+  # Simulate data once and assign the data to the synthetic likelihood object
+  sl_object@data <- synlik::simulate(sl_object, nsim = 1)
+  
+  # Set the observed data in extra arguments to match the simulated data
+  sl_object@extraArgs$obsData <- sl_object@data
+  
+  # Perform MCMC sampling using synthetic likelihood to estimate the posterior distributions of the parameters
+  sl_result <- sl_mcmc(
+    sl_object,
+    initPar    = c("alpha" = 5, "logeta" = log(0.1), "logsigma" = log(0.1)),  # Initial parameter guesses for the chain
+    niter      = 5000,      # Total number of MCMC iterations
+    burn       = 0,         # Burn-in period (no burn-in in this case)
+    propCov    = diag(c(1, 1, 1)),  # Proposal covariance matrix for the MCMC sampler
+    nsim       = 100,       # Number of simulations per MCMC iteration
+    priorFun   = function(input, ...) {
+      # Uniform prior: returns 0 if parameters are within bounds, else returns -Inf
+      if (input['logsigma'] >= (log(0.01)-10) && input['logsigma'] <= 10 && 
+          input['logeta'] >= (log(0.01)-10) && input['logeta'] <= 10 &&    
+          input['alpha'] > 0 && input['alpha'] <= 10)
+      {
+        0  # Log probability for parameters within valid bounds
+      } else {
+        -Inf  # Log probability for parameters outside valid bounds (invalid)
+      }
+    },  # Uniform prior function
+    targetRate = NULL  # No specific target acceptance rate provided
+  )
+  
+  # Record the end time after MCMC sampling
+  end_time <- Sys.time()  # End timer
+  
+  # Calculate computation time in seconds (rounded to the nearest integer)
+  computation_time <- round(as.numeric(difftime(end_time, start_time, units = "secs")))
+  
+  # Attach the computation time as an attribute of the result object
+  attr(sl_result, "time") <- computation_time
+  
+  # Calculate the posterior mean estimates (and back-transform log parameters) for reporting
+  pars <- round(c(colMeans(sl_result@chains)[1], exp(colMeans(sl_result@chains)[2:3])), 3)
+  true <- round(c(true_pars[1], exp(true_pars[2:3])), 3)
+  
+  # Write the results to a log file, appending the new line to existing content
+  write(
+    paste("SL row", i, paste(pars, collapse = ", "), "True: ", paste(true, collapse = ","), "\n"), 
+    file   = "output_log.txt", 
+    append = TRUE
+  )
+  
+  # Add the result of the current iteration to the list of all SL results
+  results_sl <- append(results_sl, sl_result)
+}
+
+# Save the list of synthetic likelihood results to a file for future analysis
+save(results_sl, file = "data/results_sl.RData")
+```
+
+```{r load sl results, include=FALSE}
+load(file = "data/results_sl.RData")
+```
+
+## 5. Particle Markov Chain Monte Carlo
+
+Particle Markov Chain Monte Carlo (PMCMC) is a state-space modeling approach that combines particle filtering with Markov Chain Monte Carlo (MCMC) to infer both the latent states and parameters of nonlinear and stochastic dynamical systems. The system in  Eq. \eqref{eq:stochrulkov} can be reformulated in the State Space modelling framework, where the first equation represent the state model and the second equation represent the measurement model. Note that, we fixed the value of slow subsystem, $y = -2.8$ as fast subsystem derives the dynamics of the system and slow subsystem in biologically plausible consitions hovers around this value. This formulation accommodates nonlinear relationships between the hidden states and observations while capturing the stochastic components of the system.
+
+$$
+\begin{aligned}
+x_{t}  &= f(x_{t-1}, \theta) = \frac{\alpha}{1 + x_{t-1}^2} - 2.8 + p_t, \quad &p_t \sim \mathcal{N}(0, \eta), \\ \\
+z_t &= g(x_t, \theta) = x_t + e_t, \quad  &e_t \sim \mathcal{N}(0, \sigma),
+\end{aligned}\tag{7}\label{eq:ss}
+$$  
+
+Here, $f(.,.)$ and $g(. ,.)$ represent state and observation equations respectively. The inference goal is to estimate the model parameters $\theta$ by marginalizing over the latent states $\mathbf{x} = \{x_t\}_{t=1}^T$  to compute the likelihood of the observed data $\mathbf{z} = \{z_t\}_{t=1}^T$. 
+
+$$
+p(\mathbf{z} \mid \theta) = \int p(\mathbf{z}, \mathbf{x} \mid \theta) \cdot d\mathbf{x}\tag{8}\label{eq:integral}
+$$  
+
+For chaotic systems, the integral becomes intractable due to the high dimensionality and nonlinearity of state-space dynamics. Particle filtering approximates the state distribution by representing it with a population of particles $\{\mathbf{x}^{(i)}\}_{i=1}^N$, each corresponding to a potential realization of the hidden state. At each time step, particles are propagated forward using the state and observation functions.
+
+In the particle filter, each weight $w^{(i)}$ is computed by comparing the simulated observation $z^{(i)}$, generated from the $i$th particle's hidden state $x^{(i)}$, to the actual observation $z$ via the likelihood function. The particles' weights are then updated based on the observation likelihood and normalized to approximate the filtering distribution $p(\mathbf{x} \mid \mathbf{z}, \theta)$. The marginal likelihood is estimated iteratively using these normalized weights.
+
+$$
+\begin{aligned}
+w^{(i)} \quad &\propto p(\mathbf{z}^{(i)} \mid \mathbf{x}^{(i)}, \theta), \\ \\
+\hat{p}(\mathbf{z} \mid \theta) &= \prod_{t=1}^T \left(\frac{1}{N} \sum_{i=1}^N w^{(i)}\right).
+\end{aligned}\tag{9}\label{eq:marg}
+$$  
+
+Particle filters provide unbiased estimates of the marginal likelihood, making them suitable for integration into MCMC-based parameter inference. PMCMC leverages this property by embedding the particle filter within an MCMC framework to sample from the joint posterior distribution of the parameters and latent states, $p(\theta, \mathbf{x} \mid \mathbf{z})$. A new parameter $\theta^*$ is proposed from a proposal distribution $K(\theta^* \mid \theta)$, and the likelihood $\hat{p}(\mathbf{z} \mid \theta^*)$ is estimated using the particle filter. The acceptance probability for the proposed parameter is then computed as:  
+
+$$
+\alpha = \min\left(1, \frac{\hat{p}(\mathbf{z} \mid \theta^*) p(\theta^*) K(\theta \mid \theta^*)}{\hat{p}(\mathbf{z} \mid \theta) p(\theta) K(\theta^* \mid \theta)}\right). \tag{10}\label{eq:acceptance}
+$$  
+If accepted, the new parameter value $\theta^*$ is retained, and one of the particle trajectories may be stored as a draw from $p(\mathbf{x} \mid \mathbf{z}, \theta^*)$. Otherwise, the algorithm remains at the current parameter value $\theta$. The proposal distribution $K(\theta^* \mid \theta)$ plays a critical role in determining how effectively the Markov chain explores the parameter space and thus influences both the convergence speed and mixing behavior of the PMCMC algorithm.
+
+Unlike methods in the Information Reduction framework, PMCMC retains all the information in the observed data, avoiding the potential loss associated with summary statistics. This feature makes it particularly advantageous for chaotic systems, where the full model structure is needed to capture the intricate dynamics. However, PMCMC is computationally demanding, as each likelihood evaluation involves running a particle filter. The performance of the method depends on the number of particles $N$, resampling schemes, and the choice of proposal distributions. Particle degeneracy, where a small number of particles dominate the weight distribution, is a common challenge that necessitates careful tuning of these elements. Resampling is often used to prevent particle degeneracy.
+
+
+```{r pmcmc, eval=FALSE, include=FALSE}
+# Initialize the list to store PMCMC results
+results_pmcmc <- list()
+
+# Set up parallel backend
+n_cores <- parallel::detectCores() - 1  # Reserve one core for system processes
+cl <- makeCluster(n_cores, type = "PSOCK")
+registerDoParallel(cl)
+
+# Get the total number of parameter combinations from the parameter grid
+n_params <- nrow(param_grid)
+
+# Run the PMCMC inference in parallel using foreach
+results_pmcmc <- foreach(
+  i = 1:n_params,                # Iterate over each row in the parameter grid
+  .combine  = append,            # Append the results from each iteration into a list
+  .packages = c("pomp")          # Load the pomp package in each worker
+) %dopar% {
+  
+  # Start timer to measure PMCMC computation time for current iteration
+  start_time <- Sys.time()  
+  
+  # Extract the true parameters for the current iteration from the parameter grid
+  true_pars <- c(
+    "alpha"    = param_grid[i, "alpha"], 
+    "logeta"   = param_grid[i, "logeta"], 
+    "logsigma" = param_grid[i, "logsigma"]
+  )
+  
+  # Define a POMP object using the dataset corresponding to the current parameter combination.
+  # The POMP object specifies the model components required for PMCMC:
+  # - Data: A data frame with time and observed values.
+  # - times: The name of the time column.
+  # - t0: The initial time.
+  # - rinit: Function for initializing the state.
+  # - rprocess: Function defining the discrete-time process model.
+  # - rmeasure: Function for simulating measurements.
+  # - dmeasure: Function for computing the measurement density.
+  # - dprior: Function for computing the prior density.
+  # - params: The parameter values used in the simulation.
+  # - statenames: The names of the state variables.
+  # - paramnames: The names of the parameters.
+  pomp_object <- pomp::pomp(
+    data       = data.frame(time = 1:100, obs = NA),
+    times      = "time",
+    t0         = 0,
+    rinit      = pmcmc_init,
+    rprocess   = discrete_time(pmcmc_step, delta.t = 1),
+    rmeasure   = pmcmc_rmeasure,
+    dmeasure   = pmcmc_dmeasure,
+    dprior     = pmcmc_dprior,
+    params     = true_pars,
+    statenames = c("x"),
+    paramnames = c("alpha", "logeta", "logsigma")
+  )
+  
+  # Simulate observations
+  pomp_object <- pomp::simulate(pomp_object)
+  
+  # Execute PMCMC using the defined POMP object.
+  # - Nmcmc: Number of MCMC iterations.
+  # - proposal: Proposal distribution for the random walk (diagonal covariance specified).
+  # - Np: Number of particles used in the particle filter.
+  pmcmc_result <- pomp::pmcmc(
+    data     = pomp_object,
+    Nmcmc    = 5000,
+    proposal = mvn_diag_rw(rw.sd = c(alpha = 1, logeta = 1, logsigma = 1)),
+    Np       = 100
+  )
+  
+  # End timer and compute the elapsed computation time in seconds
+  end_time <- Sys.time()  
+  computation_time <- round(as.numeric(difftime(end_time, start_time, units = "secs")))
+  
+  # Store the computation time as an attribute of the PMCMC result
+  attr(pmcmc_result, "time") <- computation_time
+  
+  # Extract and round the estimated parameters:
+  # - The first parameter "alpha" is taken as is.
+  # - The remaining parameters "logeta" and "logsigma" are exponentiated to transform back from log-scale.
+  pars <- round(c(coef(pmcmc_result)[1], exp(coef(pmcmc_result)[2:3])), 3)
+  
+  # Do the same rounding for the true parameters for comparison
+  true <- round(c(true_pars[1], exp(true_pars[2:3])), 3)
+  
+  # Write a log entry with the current iteration number, estimated parameters, and true parameters
+  write(
+    paste(
+      "PMCMC row", i, paste(pars, collapse = ", "), 
+      " True: ", paste(true, collapse = ", "), "\n"
+    ), 
+    file   = "output_log.txt", 
+    append = TRUE
+  )
+  
+  # Return the PMCMC result with the additional time attribute attached
+  pmcmc_result
+}
+
+# Shut down the parallel backend cluster
+stopCluster(cl)
+
+# Save the complete PMCMC results to an RData file for later analysis
+save(results_pmcmc, file = "results_pmcmc.RData")
+
+```
+
+
+```{r load pmcmc, include=FALSE}
+load(file = "data/results_pmcmc.RData")
+```
+
+--------------
+
+## 6. Comparative Analysis 
+
+In this section, I conduct a systematic comparison of the performance of the SL and PMCMC methods for inference on the fast subsystem of the stochastic Rulkov map. To perform the comparison, I generated a grid of 60 parameter combinations based on biologically plausible ranges of each parameter (see end of section 2). Next, I simulated the dataset for each parameter set and ran both methods using the same fixed slow subsystem value ($y = -2.8$), initial condition ($x_0 = 0.5$), and the same simulated dataset and true parameters. Furthermore, I used the same hyperparameters and tuning variables such as MCMC iterations ($N_{MCMC} = 5000$), burn-in iterations ($N_{burn} = 0$), number of simulated data points ($n_{sim} = 100$, proposal covariance (a diagonal matrix of $(1, 1, 1)$) to run the simulations and MCMC sampling. I selected a uniform prior on $\alpha$, $\log\eta$, and $\log\sigma$ parameters and applied log transformation for parameters $\eta$ and $\sigma$ to ensure the new proposal values remain positive. The same experimental setup across two methods, allows me to compare the accuracy of the parameter estimation while also accounting for the computational load of each technique. 
+
+To do so, I use the samples from the posterior distribution of parameters to compute relative bias (RB), root mean squared error (RMSE), correlation with the true parameters, coverage, and effective sample sizes. Moreover, I use visualization techniques to qualitatively assess model performance and compare their computational efficiency by averaging their computation time across all parameter setups. Finally, I run another experiment where I keep everything, including the deterministic parameter ($\alpha = 4.2$) and measurement noise ($\sigma = 0$), fixed across method runs but change the variance of process noise. Then, I evaluate the accuracy of the parameter estimates under each condition. Through these measures, I aim to examine the strengths and weaknesses of each method and assess the trade-offs between using each method.
+
+
+```{r results, include=FALSE}
+# =======================================
+# Prepare Results Data Frame for Comparison
+# =======================================
+# This section combines the posterior estimates from the SL and PMCMC methods 
+# into a unified data frame for comparative analysis.
+
+# Extract posterior mean estimates from SL results
+# - Each result object contains MCMC chains
+# - Compute the mean of the chains for each parameter
+sl_df <- do.call(rbind, lapply(results_sl, function(obj) colMeans(obj@chains)))
+
+# Extract posterior parameter estimates from PMCMC results
+# - Each result object contains parameter coefficients
+# - Extract the coefficients as point estimates
+pmcmc_df <- do.call(rbind, lapply(results_pmcmc, function(obj) coef(obj)))
+
+# Combine true parameter values and estimated parameters into a single data frame
+# - True parameter values are taken directly from the parameter grid
+# - SL estimates: Posterior means from SL results
+# - PMCMC estimates: Coefficients extracted from PMCMC results
+results <- data.frame(
+  alpha_true  = param_grid[, "alpha"],       # True alpha values
+  eta_true    = exp(param_grid[, "logeta"]),# True eta values (log scale transformed to original scale)
+  sigma_true  = exp(param_grid[, "logsigma"]), # True sigma values (log scale transformed to original scale)
+  alpha_sl    = sl_df[,1],                  # SL posterior mean for alpha
+  eta_sl      = exp(sl_df[,2]),             # SL posterior mean for eta (log scale transformed)
+  sigma_sl    = exp(sl_df[,3]),             # SL posterior mean for sigma (log scale transformed)
+  alpha_pmcmc = pmcmc_df[,1],               # PMCMC posterior estimate for alpha
+  eta_pmcmc   = exp(pmcmc_df[,2]),          # PMCMC posterior estimate for eta (log scale transformed)
+  sigma_pmcmc = exp(pmcmc_df[,3])           # PMCMC posterior estimate for sigma (log scale transformed)
+)
+```
+
+
+
+First, I computed the average RB for SL and PMCMC methods to compare their accuracy in parameter estimation. Relative Bias (RB) accounts for differences in parameter scales, making results comparable. I defined the average RB of each parameter as the difference between the estimated and true values, normalized by true value, and averaged across all parameter combinations. As shown in Table \ref{tab:relative-bias}, both methods have a low bias for $\alpha$ but SL slightly lower. The RB is higher when estimating $\eta$ and even more pronounced when estimating $\sigma$, which may be attributed to the greater sensitivity of RB to smaller parameter values compared to $\alpha$. For $\eta$, SL underestimates it, while PMCMC overestimates it roughly by the same ammount. For $\sigma$, SL underestimates and PMCMC overestimates.
+
+
+```{r bias, echo=FALSE}
+# =======================================
+# Compute Relative Bias for Parameter Estimates
+# =======================================
+# This section calculates the average relative bias in parameter estimates 
+# for the SL and PMCMC methods and combines the results into a summary table.
+
+# ---------------------------------------
+# Relative Bias Calculation for SL Method
+# ---------------------------------------
+# Compute the relative bias for alpha, eta, and sigma:
+# - Relative bias = (Mean Estimated Value - Mean True Value) / Mean True Value
+bias_sl <- colMeans(
+  results[, c("alpha_sl", "eta_sl", "sigma_sl")] - 
+    results[, c("alpha_true", "eta_true", "sigma_true")]
+) / colMeans(results[, c("alpha_true", "eta_true", "sigma_true")])
+
+# ---------------------------------------
+# Relative Bias Calculation for PMCMC Method
+# ---------------------------------------
+# Compute the relative bias for alpha, eta, and sigma using the PMCMC method
+bias_pmcmc <- colMeans(
+  results[, c("alpha_pmcmc", "eta_pmcmc", "sigma_pmcmc")] - 
+    results[, c("alpha_true", "eta_true", "sigma_true")]
+) / colMeans(results[, c("alpha_true", "eta_true", "sigma_true")])
+
+# ---------------------------------------
+# Combine Relative Bias Results into a Table
+# ---------------------------------------
+# Create a data frame to summarize relative bias for both methods
+bias_table <- data.frame(
+  Method    = c("SL", "PMCMC"),      # Methods being compared
+  alphaBias = c(bias_sl[1], bias_pmcmc[1]),  # Relative bias for alpha estimates
+  etaBias   = c(bias_sl[2], bias_pmcmc[2]),  # Relative bias for eta estimates
+  sigmaBias = c(bias_sl[3], bias_pmcmc[3])   # Relative bias for sigma estimates
+)
+
+# Rename columns to display Greek letters for parameter names
+colnames(bias_table) <- c(
+  "Method", 
+  "Bias ($\\alpha$)", 
+  "Bias ($\\eta$)", 
+  "Bias ($\\sigma$)"
+)
+
+# Remove row names for cleaner table output
+row.names(bias_table) <- NULL
+
+# ---------------------------------------
+# Format and Print Bias Table
+# ---------------------------------------
+# Generate a LaTeX table for inclusion in the report
+# - Use kable for table creation and kableExtra for styling
+# - Add a label for referencing the table in the text
+kable(
+  bias_table, 
+  format = "latex", 
+  booktabs = TRUE,      # Add horizontal rules for professional formatting
+  escape = FALSE,       # Prevent escaping of LaTeX symbols (e.g., Greek letters)
+  digits = 3,           # Round relative bias values to 3 decimal places
+  caption = "Average relative bias in parameter estimates for SL and PMCMC. \\label{tab:relative-bias}" # Add a label
+) %>%
+  kable_styling(latex_options = "hold_position") # Ensure the table stays in position in the LaTeX output
+
+
+```
+
+Next, I calculated the RMSE for SL and PMCMC to assess the average deviation of parameter estimates from their true values. The RMSE values, presented in Table \ref{tab:rmse}, indicate that SL outperforms PMCMC for $\alpha$, with a notably lower RMSE. For $\eta$ and $\sigma$, the RMSE values are comparable between the two methods, with PMCMC showing a slight advantage for $\sigma$, while SL performs marginally better for $\eta$. These results suggest that SL provides more accurate estimates for $\alpha$, while both methods perform similarly in estimating $\eta$ and $\sigma$. Additionally, I evaluated the correlation between true parameter values and their inferred estimates, as shown in Table \ref{tab:corr}. A higher correlation reflects greater fidelity in tracking parameter variations. Both methods exhibit high correlations for all parameters; however, SL achieves stronger correlations for $\alpha$ and $\eta$, whereas PMCMC achieves a higher correlation for $\sigma$.
+
+
+```{r rmse, echo=FALSE}
+# =======================================
+# Root Mean Squared Error (RMSE) Calculation
+# =======================================
+# This section calculates the RMSE for SL and PMCMC methods to evaluate 
+# the average deviation of parameter estimates from their true values. 
+# RMSE accounts for both positive and negative errors, focusing on overall accuracy.
+
+# ---------------------------------------
+# RMSE Calculation for SL Method
+# ---------------------------------------
+# Compute the RMSE for alpha, eta, and sigma by taking the square root of the 
+# mean squared deviations between estimated and true values.
+rmse_sl <- sqrt(colMeans(
+  (results[, c("alpha_sl", "eta_sl", "sigma_sl")] - 
+     results[, c("alpha_true", "eta_true", "sigma_true")])^2
+))
+
+# ---------------------------------------
+# RMSE Calculation for PMCMC Method
+# ---------------------------------------
+# Compute the RMSE for alpha, eta, and sigma using the same formula as SL.
+rmse_pmcmc <- sqrt(colMeans(
+  (results[, c("alpha_pmcmc", "eta_pmcmc", "sigma_pmcmc")] - 
+     results[, c("alpha_true", "eta_true", "sigma_true")])^2
+))
+
+# ---------------------------------------
+# Combine RMSE Results into a Table
+# ---------------------------------------
+# Create a data frame summarizing RMSE values for SL and PMCMC methods
+rmse_table <- data.frame(
+  Method       = c("SL", "PMCMC"),           # Methods being compared
+  alphaRMSE    = c(rmse_sl[1], rmse_pmcmc[1]), # RMSE for alpha estimates
+  etaRMSE      = c(rmse_sl[2], rmse_pmcmc[2]), # RMSE for eta estimates
+  sigmaRMSE    = c(rmse_sl[3], rmse_pmcmc[3])  # RMSE for sigma estimates
+)
+
+# Rename columns to display Greek letters for parameter names
+colnames(rmse_table) <- c(
+  "Method",
+  "RMSE ($\\alpha$)", 
+  "RMSE ($\\eta$)", 
+  "RMSE ($\\sigma$)"
+)
+
+# Remove row names for a cleaner table
+row.names(rmse_table) <- NULL
+
+# ---------------------------------------
+# Format and Print RMSE Table
+# ---------------------------------------
+# Generate a LaTeX table for inclusion in the report
+# - Use kable for creating the table and kableExtra for styling
+# - Add a label for referencing the table in the text
+kable(
+  rmse_table, 
+  format = "latex", 
+  booktabs = TRUE,      # Add horizontal rules for professional formatting
+  escape = FALSE,       # Prevent escaping of LaTeX symbols (e.g., Greek letters)
+  digits = 3,           # Round RMSE values to 3 decimal places
+  caption = "Root mean squared error (RMSE) of parameter estimates for SL and PMCMC. \\label{tab:rmse}" # Add a label
+) %>%
+  kable_styling(latex_options = "hold_position") # Ensure the table stays in position in the LaTeX output
+
+```
+
+
+```{r corr, echo=FALSE}
+# -------------------------------------------------------------------
+# Correlation Analysis for SL vs PMCMC
+# -------------------------------------------------------------------
+# Here, I measure how closely each method's estimates track shifts 
+# in the true parameters. A higher correlation suggests the method 
+# effectively captures changes in alpha, eta, and sigma.
+
+correlation_results <- data.frame(
+  Method = c("SL", "PMCMC"),
+  CorAlpha = c(
+    cor(results$alpha_true, results$alpha_sl), 
+    cor(results$alpha_true, results$alpha_pmcmc)
+  ),
+  CorEta = c(
+    cor(results$eta_true, results$eta_sl),
+    cor(results$eta_true, results$eta_pmcmc)
+  ),
+  CorSigma = c(
+    cor(results$sigma_true, results$sigma_sl),
+    cor(results$sigma_true, results$sigma_pmcmc)
+  )
+)
+
+colnames(correlation_results) <- c(
+  "Method",
+  "Corr($\\alpha$, $\\hat{\\alpha}$)", 
+  "Corr($\\eta$, $\\hat{\\eta}$)", 
+  "Corr($\\sigma$, $\\hat{\\sigma}$)"
+)
+
+row.names(correlation_results) <- NULL  
+  
+# To produce a nicer table (for example, if using LaTeX output):
+kable(correlation_results, format = "latex", booktabs = TRUE, digits = 3, escape = FALSE,
+      caption = "Correlation coefficients comparing SL and PMCMC estimates with true parameters.\\label{tab:corr}") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+The plots in Figure \ref{fig:boxplot} present the estimated values of parameters ($\alpha$, $\eta$, $\sigma$) against their true values for both methods, SL (blue) and PMCMC (orange), using side-by-side boxplots. Each pair of boxplots corresponds to a specific true parameter value, allowing for a clear comparison of the two methods' performance across parameter ranges. The width of the boxes reflects the variability of the estimates, with narrower boxes indicating greater consistency. For $\alpha$, PMCMC demonstrates greater variability at the lower end, suggesting some bias or inaccuracy in estimating smaller values, while SL appears more stable across the range. For $\eta$, both methods generally perform well, but SL exhibits tighter distributions, especially around true values of 0.5 and 1.0. Similarly, for $\sigma$, the estimates show good agreement with true values, though PMCMC displays slightly higher variability at the lower end. These patterns highlight subtle differences between the methods, with SL offering more consistent results overall, particularly for higher parameter values.
+
+```{r boxplot, echo=FALSE, fig.cap="**Boxplots of Estimated Parameters:** *compare the estimated values of ($\\alpha$, $\\eta$, $\\sigma$)  against their true values for SL (blue) and PMCMC (orange). Each pair of boxplots represents the distribution and variability of estimates for a specific true value, highlighting SL's greater consistency across parameters and PMCMC's higher variability, especially at lower true values.*\\label{fig:boxplot}", fig.height=8, fig.width=6, fig.pos="H" }
+# -------------------------------------------------------------------
+# Visual Comparison of Estimates vs. True Parameters
+# -------------------------------------------------------------------
+# Each ggplot below compares the true parameter (x-axis) with the 
+# corresponding estimates from SL and PMCMC (y-axis) using side-by-side
+# boxplots. Each pair of boxplots corresponds to a specific true value 
+# of the parameter, and the two methods (SL and PMCMC) are compared 
+# visually for variability and accuracy. Side-by-side boxplots allow 
+# direct comparisons without clutter caused by overlapping points.
+
+# Reshape the data into a long format for easier plotting
+# - `pivot_longer` converts wide format (separate columns for SL/PMCMC) 
+#   into a long format with columns: parameter, method, and estimate.
+results_long <- results %>%
+  pivot_longer(
+    cols = c(alpha_sl, alpha_pmcmc, eta_sl, eta_pmcmc, sigma_sl, sigma_pmcmc), # Columns to reshape
+    names_to = c("parameter", "method"),                                       # New column names
+    names_sep = "_",                                                           # Separator between parameter and method
+    values_to = "estimate"                                                     # New column for estimates
+  ) %>%
+  mutate(method = ifelse(method == "sl", "SL", "PMCMC"))  # Rename methods for clarity (sl -> SL, pmcmc -> PMCMC)
+
+# Add a column for the true values of the corresponding parameter
+# - `case_when` assigns the appropriate true value (alpha_true, eta_true, sigma_true) 
+#   based on the parameter being processed.
+results_long <- results_long %>%
+  mutate(
+    true_value = case_when(
+      parameter == "alpha" ~ alpha_true,
+      parameter == "eta" ~ eta_true,
+      parameter == "sigma" ~ sigma_true
+    )
+  )
+
+# Create the boxplot for alpha
+# - `geom_boxplot` creates the boxplots for SL and PMCMC, positioned side-by-side 
+#   for each true value.
+p1 <- ggplot(filter(results_long, parameter == "alpha"), aes(x = factor(true_value), y = estimate, fill = method)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75), alpha = 0.7) +  # Adjust position and transparency
+  ggtitle(expression(paste("True vs Estimated ", alpha))) +                                # Title for the plot
+  xlab(expression(paste("True ", alpha))) +                                                # X-axis label
+  ylab(expression(paste("Estimated ", hat(alpha)))) +                                      # Y-axis label
+  scale_fill_manual(values = c("SL" = "navy", "PMCMC" = "orange")) +                       # Custom colors for methods
+  theme_minimal() +                                                                        # Minimal theme for cleaner visualization
+  theme(legend.position = "none")                                                         # Hide legend
+
+# Create the boxplot for eta
+p2 <- ggplot(filter(results_long, parameter == "eta"), aes(x = factor(true_value), y = estimate, fill = method)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75), alpha = 0.7) +
+  ggtitle(expression(paste("True vs Estimated ", eta))) +
+  xlab(expression(paste("True ", eta))) +
+  ylab(expression(paste("Estimated ", hat(eta)))) +
+  scale_fill_manual(values = c("SL" = "navy", "PMCMC" = "orange")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Create the boxplot for sigma
+p3 <- ggplot(filter(results_long, parameter == "sigma"), aes(x = factor(true_value), y = estimate, fill = method)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.75), alpha = 0.7) +
+  ggtitle(expression(paste("True vs Estimated ", sigma))) +
+  xlab(expression(paste("True ", sigma))) +
+  ylab(expression(paste("Estimated ", hat(sigma)))) +
+  scale_fill_manual(values = c("SL" = "navy", "PMCMC" = "orange")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")  # Place legend at the bottom
+
+# Arrange the three plots vertically
+# - `grid.arrange` stacks the plots, adjusting heights for better alignment.
+grid.arrange(p1, p2, p3, ncol = 1, heights = c(1, 1, 1.2))
+
+```
+
+
+
+
+Both SL and PMCMC are MCMC-based methods which enables straightforward construction of 95% credible intervals. I compute the coverage percentage by comparing 95% empirical credible intervals with true value of the parameter for all 60 combinations. for b and then checking how often these intervals include the true parameter, 
+
+
+
+```{r uq, include=FALSE}
+# -----------------------------------------------------------------------
+# UNCERTAINTY QUANTIFICATION 
+# -----------------------------------------------------------------------
+# Here, I gather the 95% credible intervals for alpha, eta, and sigma
+# from both SL (chains slot) and PMCMC (traces slot) in a single data frame.
+# This approach avoids explicit for-loops by using lapply and rbind, 
+# resulting in simpler, more efficient code.
+# Compute 2.5% and 97.5% quantiles of a numeric vector
+ci_quantiles <- function(x, probs = c(0.025, 0.975)) {
+  unname(quantile(x, probs))
+}
+parnames <- names(results_sl[[1]]@param)
+# Collect credible intervals from SL objects
+sl_ci_df <- do.call(rbind, lapply(seq_along(results_sl), function(i) {
+  # Extract posterior samples for the ith run
+  sl_samples <- results_sl[[i]]@chains
+  colnames(sl_samples) <- parnames
+  
+  # Compute CIs for alpha, eta, sigma (note that eta/sigma come from exponentiating logeta/logsigma)
+  alpha_ci <- ci_quantiles(sl_samples[, "alpha"])
+  eta_ci   <- ci_quantiles(exp(sl_samples[, "logeta"]))
+  sigma_ci <- ci_quantiles(exp(sl_samples[, "logsigma"]))
+  
+  # Assemble into a small data frame
+  data.frame(
+    Method   = "SL",
+    Run      = i,
+    Param    = c("alpha", "eta", "sigma"),
+    CI_Lower = c(alpha_ci[1], eta_ci[1], sigma_ci[1]),
+    CI_Upper = c(alpha_ci[2], eta_ci[2], sigma_ci[2])
+  )
+}))
+
+# Collect credible intervals from PMCMC objects
+pmcmc_ci_df <- do.call(rbind, lapply(seq_along(results_pmcmc), function(i) {
+  # Extract posterior samples for the ith run
+  pmcmc_samples <- results_pmcmc[[i]]@traces
+  
+  # Compute CIs for alpha, eta, sigma (with exponentiation for logeta/logsigma)
+  alpha_ci <- ci_quantiles(pmcmc_samples[, "alpha"])
+  eta_ci   <- ci_quantiles(exp(pmcmc_samples[, "logeta"]))
+  sigma_ci <- ci_quantiles(exp(pmcmc_samples[, "logsigma"]))
+  
+  data.frame(
+    Method   = "PMCMC",
+    Run      = i,
+    Param    = c("alpha", "eta", "sigma"),
+    CI_Lower = c(alpha_ci[1], eta_ci[1], sigma_ci[1]),
+    CI_Upper = c(alpha_ci[2], eta_ci[2], sigma_ci[2])
+  )
+}))
+
+# Combine the two data frames
+ci_data <- rbind(sl_ci_df, pmcmc_ci_df)
+
+# 'ci_data' now holds, for each run and parameter, the 2.5% and 97.5% quantiles 
+# indicating uncertainty in the parameter estimates for both SL and PMCMC.
+# -----------------------------------------------------------------------
+
+```
+
+```{r coverage, echo=FALSE, warning=FALSE}
+# -----------------------------------------------------------------------
+# COVERAGE ANALYSIS (first point) - VECTORIZED APPROACH
+# -----------------------------------------------------------------------
+# I check whether the true parameter lies within each 95% credible interval 
+# (previously computed) and then compute the fraction of runs in which coverage occurs. 
+# This helps reveal whether intervals tend to be too narrow (coverage < 95%) 
+# or too wide (coverage > 95%).
+coverage_results <- ci_data %>%
+  # Use rowwise processing to match each interval row with its true parameter value
+  rowwise() %>%
+  mutate(
+    # For each row, figure out the true parameter value based on Param
+    true_val = case_when(
+      Param == "alpha" ~ param_grid[Run, "alpha"],
+      Param == "eta"   ~ exp(param_grid[Run, "logeta"]),
+      Param == "sigma" ~ exp(param_grid[Run, "logsigma"])
+    ),
+    # Check if the true value falls within [CI_Lower, CI_Upper]
+    covered = (true_val >= CI_Lower & true_val <= CI_Upper)
+  ) %>%
+  ungroup() %>%
+  # Group by method and parameter, then compute coverage proportion
+  group_by(Method, Param) %>%
+  summarise(Coverage = mean(covered)) %>%
+  ungroup()
+
+# 'coverage_results' now has a row for each (Method, Param) pair,
+# indicating the proportion of runs in which the true parameter value 
+# fell inside the 95% credible interval.
+# -----------------------------------------------------------------------
+# Print a nice coverage table (already computed in 'coverage_results')
+# -----------------------------------------------------------------------
+kable(
+  coverage_results,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Coverage of 95\\% credible intervals for each method and parameter.",
+  escape = FALSE,
+  digits = 3
+) %>%
+  kable_styling(latex_options = "hold_position")
+
+# -----------------------------------------------------------------------
+
+```
+
+
+
+Measuring computational cost is vital in deciding whether a given inference technique remains practical as problem sizes grow or models become more complex. By recording the time each method takes to deliver results, I can compare their overall efficiency and assess which approach might become a bottleneck under real-world conditions or larger-scale applications.
+
+```{r computation, echo=FALSE}
+# -----------------------------------------------------------------------
+# COMPUTATION TIME COMPARISON
+# -----------------------------------------------------------------------
+# I collect runtime information for each run of SL and PMCMC, pivot it 
+# into a long format, and then present the distribution of execution 
+# times in a boxplot. This helps reveal typical durations, as well as 
+# any potential outliers, for the two methods.
+
+comp_time  <- data.frame(
+  time_sl    = do.call(rbind, lapply(results_sl,    function(obj) obj@time)),
+  time_pmcmc = do.call(rbind, lapply(results_pmcmc, function(obj) obj@time))
+)
+
+comp_long <- comp_time %>%
+  pivot_longer(
+    cols = c(time_sl, time_pmcmc),
+    names_to = "method",
+    values_to = "time"
+  )
+
+ggplot(comp_long, aes(x = method, y = time, fill = method)) +
+  geom_boxplot() +
+  labs(
+    title = "Computation Times for SL and PMCMC Methods",
+    x = "Method",
+    y = "Time (seconds)"
+  ) +
+  theme_minimal()
+
+# If desired, we can also produce a summary table:
+comp_summary <- comp_long %>%
+  group_by(method) %>%
+  summarise(
+    MeanTime   = mean(time),
+    MedianTime = median(time),
+    MinTime    = min(time),
+    MaxTime    = max(time)
+  )
+
+# Printing a nice LaTeX table (for PDF output) using kable
+kable(
+  comp_summary, 
+  format = "latex", 
+  booktabs = TRUE, 
+  digits = 3,
+  caption = "Summary of computation times (seconds) for SL and PMCMC."
+) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+```{r noise params, include=FALSE}
+# Define the grid of parameters to evaluate
+param_noise <- as.data.frame(
+  expand.grid(
+    alpha    = c(4.3),
+    logeta   = log(seq(0.01, 0.5, by = 0.03)),
+    logsigma = log(c(0.001))
+    )
+  )
+n_noise <- nrow(param_noise)
+```
+
+
+
+```{r noise_comp, eval=FALSE, include=FALSE}
+res_noise_sl <- list()
+for(i in seq_len(n_noise)) { 
+  true_pars <- c(
+    "alpha"       = param_noise[i, "alpha"], 
+    "logeta"      = param_noise[i, "logeta"], 
+    "logsigma"    = param_noise[i, "logsigma"]
+  )
+  
+  sl_object <- synlik::synlik(
+    simulator = sl_simulate,  # Simulation function
+    summaries = sl_stats,   # Summary statistics function  
+    param     = true_pars,     # True parameters
+    extraArgs = list(            # Additional simulation arguments
+      "nObs"     = 100,         # Number of observations
+      "nBurn"    = 0,         # Burn-in period
+      "randInit" = FALSE,        # Random initialization
+      "initVals" = c(0.5)
+    ) 
+  )
+  
+  sl_object@data <- synlik::simulate(sl_object, nsim = 1) 
+  sl_object@extraArgs$obsData <- sl_object@data
+  
+  # Define a synthetic likelihood object for fast subsystems of the Rulkov map
+  noise_sl <- sl_mcmc(  # Perform MCMC sampling to estimate posterior distributions
+    sl_object,
+    initPar    = c("alpha" = 5, "logeta" = log(0.5), "logsigma" = log(0.001)),  # Initial parameter values
+    niter      = 5000,  # Number of iterations
+    burn       = 0,   # Burn-in period
+    propCov    = diag(c(1, 1, 1)) ,  # Proposal covariance
+    nsim       = 100,  # Number of simulations per iteration
+    priorFun   = function(input, ...) {
+      # Uniform prior: returns 0 if parameters are within bounds, else returns -Inf
+      if (input['logsigma'] >= (log(0.01)-10) && input['logsigma'] <= 10 && 
+          input['logeta'] >= (log(0.01)-10) && input['logeta'] <= 10 &&    
+          input['alpha'] > 0 && input['alpha'] <= 10)
+      {
+        0  # Log probability for parameters within valid bounds
+      } else {
+        -Inf  # Log probability for parameters outside valid bounds (invalid)
+      }
+    },  # Uniform prior
+    targetRate = NULL  # Target acceptance rate
+  )
+  
+  
+  pars <- round(c(colMeans(noise_sl@chains)[1], exp(colMeans(noise_sl@chains)[2:3])), 3)
+  true <- round(c(true_pars[1], exp(true_pars[2:3])), 3)
+  write(
+    paste(
+      "SL row (noise exp) : ", i,  paste(pars, collapse = ", "), 
+      " True: ",  paste(true, collapse = ","), "\n"
+      ), 
+    file   = "output_log.txt", 
+    append = TRUE
+  )
+  res_noise_sl <- append(res_noise_sl, noise_sl)
+}
+save(res_noise_sl, file = "res_noise_sl.RData")
+
+# Initialize the main results list
+res_noise_pmcmc <- list()
+
+# Set up parallel backend
+n_cores  <- parallel::detectCores() - 1  # Leave one core free
+cl       <- makeCluster(n_cores, type = "PSOCK")
+registerDoParallel(cl)
+
+# Parallel loop using foreach
+res_noise_pmcmc  <- foreach(
+  i         = 1:n_noise, 
+  .combine  = append, 
+  .packages = c("pomp")
+) %dopar% {
+  
+  true_pars <- c(
+    "alpha"       = param_noise[i, "alpha"], 
+    "logeta"      = param_noise[i, "logeta"], 
+    "logsigma"    = param_noise[i, "logsigma"]
+  )
+
+  
+  # Define POMP object
+  pomp_object <- pomp::pomp(
+    data       = data.frame(time = 1:100, obs = NA),
+    times      = "time",
+    t0         = 0,
+    rinit      = pmcmc_init,
+    rprocess   = discrete_time(pmcmc_step, delta.t = 1),
+    rmeasure   = pmcmc_rmeasure,
+    dmeasure   = pmcmc_dmeasure,
+    dprior     = pmcmc_dprior,
+    params     = true_pars,
+    statenames = c("x"),
+    paramnames = c("alpha", "logeta", "logsigma")
+  )
+  
+  pomp_object <- pomp::simulate(pomp_object)
+  
+  # Run PMCMC
+  noise_pmcmc <- pomp::pmcmc(
+    data     = pomp_object,
+    Nmcmc    = 5000,
+    proposal = mvn_diag_rw(rw.sd = c(alpha = 1, logeta = 1, logsigma = 1)),
+    Np       = 100
+  )
+  
+  pars <- c(coef(noise_pmcmc)[1], exp(coef(noise_pmcmc)[2:3]))
+  true <- round(c(true_pars[1], exp(true_pars[2:3])), 3)
+  write(
+    paste(
+      "PMCMC row (noise exp) : ", i, paste(pars, collapse = ", "), 
+      " True: ",paste(true, collapse = ", "),   "\n"), 
+    file   = "output_log.txt", 
+    append = TRUE
+  )
+  # Return the result with the added attribute
+  noise_pmcmc
+}
+
+# Stop parallel backend
+stopCluster(cl)
+save(res_noise_pmcmc, file = "res_noise_pmcmc.RData")
+```
+
+```{r load noise_comp, include=FALSE}
+load(file = "data/res_noise_pmcmc.RData")
+load(file = "data/res_noise_sl.RData")
+
+sl_noise_df <- do.call(rbind, lapply(res_noise_sl, function(obj) colMeans(obj@chains)))
+pmcmc_noise_df <- do.call(rbind, lapply(res_noise_pmcmc, function(obj) coef(obj)))
+
+results_noise <- data.frame(
+  alpha_true  = param_noise[, "alpha"],
+  eta_true    = exp(param_noise[, "logeta"]),
+  sigma_true  = exp(param_noise[, "logsigma"]),
+  alpha_sl    = sl_noise_df[,1],
+  eta_sl      = exp(sl_noise_df[,2]),
+  sigma_sl    = exp(sl_noise_df[,3]),
+  alpha_pmcmc = pmcmc_noise_df[,1],
+  eta_pmcmc   = exp(pmcmc_noise_df[,2]),
+  sigma_pmcmc = exp(pmcmc_noise_df[,3])
+)
+```
+
+
+```{r noise results, include=FALSE}
+# -----------------------------------------------------------------------
+# COMPARING ESTIMATION ACCURACY FOR DIFFERENT PROCESS NOISE LEVELS
+# -----------------------------------------------------------------------
+# In this code, I group the results by distinct levels of process noise 
+# (eta), then compute and compare estimation accuracy metrics for both SL 
+# and PMCMC across these noise levels. This highlights how sensitive each 
+# method is to increasing stochasticity in the system.
+
+
+# Assume 'results' contains:
+#   alpha_true, eta_true, sigma_true
+#   alpha_sl,   eta_sl,   sigma_sl
+#   alpha_pmcmc, eta_pmcmc, sigma_pmcmc
+# each row corresponding to a run with a specific noise level (eta_true).
+
+# Optionally, create a factor to label noise levels more clearly, for example:
+# results$NoiseLevel <- factor(round(results$eta_true, 3))
+
+# Group by the actual value of eta_true (process noise), 
+# then compute bias and RMSE for alpha, eta, sigma in SL and PMCMC.
+accuracy_by_noise <- results_noise %>%
+  group_by(eta_true) %>%
+  summarise(
+    # Bias and RMSE for alpha using SL
+    alpha_bias_sl    = mean(alpha_sl - alpha_true),
+    alpha_rmse_sl    = sqrt(mean((alpha_sl - alpha_true)^2)),
+    
+    # Bias and RMSE for alpha using PMCMC
+    alpha_bias_pmcmc = mean(alpha_pmcmc - alpha_true),
+    alpha_rmse_pmcmc = sqrt(mean((alpha_pmcmc - alpha_true)^2)),
+    
+    # Bias and RMSE for eta using SL
+    eta_bias_sl      = mean(eta_sl - eta_true),
+    eta_rmse_sl      = sqrt(mean((eta_sl - eta_true)^2)),
+    
+    # Bias and RMSE for eta using PMCMC
+    eta_bias_pmcmc   = mean(eta_pmcmc - eta_true),
+    eta_rmse_pmcmc   = sqrt(mean((eta_pmcmc - eta_true)^2)),
+    
+    # Bias and RMSE for sigma using SL
+    sigma_bias_sl    = mean(sigma_sl - sigma_true),
+    sigma_rmse_sl    = sqrt(mean((sigma_sl - sigma_true)^2)),
+    
+    # Bias and RMSE for sigma using PMCMC
+    sigma_bias_pmcmc = mean(sigma_pmcmc - sigma_true),
+    sigma_rmse_pmcmc = sqrt(mean((sigma_pmcmc - sigma_true)^2))
+  ) %>%
+  ungroup()
+
+```
+
+
+
+```{r noise summary, echo=FALSE, fig.cap="*Simulated trajectories showing divergence in three setups: different initial states, different ($\\alpha$) values, and small randomness. Each plot overlays two trajectories (navy and orange) to highlight how small differences in initial conditions, parameter values, or stochastic perturbations lead to divergent behaviors, reflecting the chaotic dynamics of the system.*\\label{fig:noisesum}", fig.height=3.5, fig.width=3.5, fig.pos="H" }
+# -----------------------------------------------------------------------
+# ASSUMPTIONS:
+# - 'results_noise' contains the following columns for each simulation:
+#     alpha_true, eta_true, sigma_true : True parameter values.
+#     alpha_sl,   eta_sl,   sigma_sl    : SL estimates.
+#     alpha_pmcmc, eta_pmcmc, sigma_pmcmc : PMCMC estimates.
+#
+# We vary only process noise (eta_true) and want to compare estimation accuracy.
+# -----------------------------------------------------------------------
+
+# -----------------------------------------------------------------------
+# Create Noise Level Bins (4 levels: Very Low, Low, Medium, High)
+# -----------------------------------------------------------------------
+results_noise <- results_noise %>%
+  mutate(
+    noise_bin = cut(eta_true,
+                    breaks = quantile(eta_true, probs = seq(0, 1, by = 0.25), na.rm = TRUE),
+                    include.lowest = TRUE,
+                    labels = c("Very Low", "Low", "Medium", "High"))
+  )
+
+# -----------------------------------------------------------------------
+# Create Summary Table: Compute Average RMSE for each parameter and method per noise bin
+# RMSE is computed as sqrt(mean((estimate - true_value)^2)).
+# -----------------------------------------------------------------------
+summary_rmse <- results_noise %>%
+  group_by(noise_bin) %>%
+  summarise(
+    # SL method RMSEs
+    alpha_rmse_sl    = sqrt(mean((alpha_sl - alpha_true)^2, na.rm = TRUE)),
+    eta_rmse_sl      = sqrt(mean((eta_sl - eta_true)^2, na.rm = TRUE)),
+    sigma_rmse_sl    = sqrt(mean((sigma_sl - sigma_true)^2, na.rm = TRUE)),
+    
+    # PMCMC method RMSEs
+    alpha_rmse_pmcmc = sqrt(mean((alpha_pmcmc - alpha_true)^2, na.rm = TRUE)),
+    eta_rmse_pmcmc   = sqrt(mean((eta_pmcmc - eta_true)^2, na.rm = TRUE)),
+    sigma_rmse_pmcmc = sqrt(mean((sigma_pmcmc - sigma_true)^2, na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+# -----------------------------------------------------------------------
+# Create Plots: RMSE for each parameter as Process Noise Increases
+# -----------------------------------------------------------------------
+
+# Plot for RMSE of 'alpha'
+p_alpha <- ggplot(results_noise, aes(x = eta_true)) +
+  geom_point(aes(y = abs(alpha_sl - alpha_true), color = "SL"), size = 2, alpha = 0.7) +
+  geom_line(aes(y = abs(alpha_sl - alpha_true), color = "SL"), alpha = 0.7) +
+  geom_point(aes(y = abs(alpha_pmcmc - alpha_true), color = "PMCMC"), size = 2, alpha = 0.7) +
+  geom_line(aes(y = abs(alpha_pmcmc - alpha_true), color = "PMCMC"), alpha = 0.7) +
+  labs(title = "RMSE for Alpha vs. Process Noise", x = expression(eta[true]), y = "Absolute Error (alpha)") +
+  scale_color_manual(name = "Method", values = c("SL" = "navy", "PMCMC" = "orange")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Plot for RMSE of 'eta'
+p_eta <- ggplot(results_noise, aes(x = eta_true)) +
+  geom_point(aes(y = abs(eta_sl - eta_true), color = "SL"), size = 2, alpha = 0.7) +
+  geom_line(aes(y = abs(eta_sl - eta_true), color = "SL"), alpha = 0.7) +
+  geom_point(aes(y = abs(eta_pmcmc - eta_true), color = "PMCMC"), size = 2, alpha = 0.7) +
+  geom_line(aes(y = abs(eta_pmcmc - eta_true), color = "PMCMC"), alpha = 0.7) +
+  labs(title = "RMSE for Eta vs. Process Noise", x = expression(eta[true]), y = "Absolute Error (eta)") +
+  scale_color_manual(name = "Method", values = c("SL" = "navy", "PMCMC" = "orange")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Plot for RMSE of 'sigma'
+p_sigma <- ggplot(results_noise, aes(x = eta_true)) +
+  geom_point(aes(y = abs(sigma_sl - sigma_true), color = "SL"), size = 2, alpha = 0.7) +
+  geom_line(aes(y = abs(sigma_sl - sigma_true), color = "SL"), alpha = 0.7) +
+  geom_point(aes(y = abs(sigma_pmcmc - sigma_true), color = "PMCMC"), size = 2, alpha = 0.7) +
+  geom_line(aes(y = abs(sigma_pmcmc - sigma_true), color = "PMCMC"), alpha = 0.7) +
+  labs(title = "RMSE for Sigma vs. Process Noise", x = expression(eta[true]), y = "Absolute Error (sigma)") +
+  scale_color_manual(name = "Method", values = c("SL" = "navy", "PMCMC" = "orange")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Arrange the three plots vertically
+grid.arrange(p_alpha, p_eta, p_sigma, ncol = 1, heights = c(1, 1, 1.2))
+
+# -----------------------------------------------------------------------
+# Print the Summary Table: Average RMSEs by Noise Bin (4 rows x 6 columns)
+# Columns: "Alpha RMSE (SL)", "Eta RMSE (SL)", "Sigma RMSE (SL)",
+#          "Alpha RMSE (PMCMC)", "Eta RMSE (PMCMC)", "Sigma RMSE (PMCMC)"
+# -----------------------------------------------------------------------
+kable(summary_rmse, digits = 3, 
+      col.names = c("Noise Level", "Alpha RMSE (SL)", "Eta RMSE (SL)", "Sigma RMSE (SL)",
+                    "Alpha RMSE (PMCMC)", "Eta RMSE (PMCMC)", "Sigma RMSE (PMCMC)"),
+      caption = "Average RMSE by Noise Level (SL and PMCMC)")
+
+```
+
+
+--------------
+
+## 7. Conclusion  
+ 
+
+--------------
+
+
+## 8. Bibliography:
+
+- Abarbanel, H. D. I. (1996). **Analysis of Observed Chaotic Data**. *Springer*.
+
+- Andrieu, C., Doucet, A., & Holenstein, R. (2010). **Particle Markov chain Monte Carlo methods**. *Journal of the Royal Statistical Society: Series B (Statistical Methodology)*, 72(3), 269-342.
+
+- Beaumont, M. A., Zhang, W., & Balding, D. J. (2002). **Approximate Bayesian computation in population genetics**. *Genetics*, 162(4), 2025-2035.
+
+- Burnham, K. P., & Anderson, D. R. (2002). **Model Selection and Multimodel Inference: A Practical Information-Theoretic Approach**. *Springer Science & Business Media*. 
+
+- Durbin, J., & Koopman, S. J. (2012). **Time Series Analysis by State Space Methods** (2nd ed.). *Oxford University Press*.  
+
+- Kalman, R. E. (1960). **A new approach to linear filtering and prediction problems**. *Transactions of the ASME–Journal of Basic Engineering*, 82(1), 35–45.  
+
+- Kantz, H., & Schreiber, T. (2003). **Nonlinear Time Series Analysis** (2nd ed.). *Cambridge University Press*.
+
+- Ibarz, B., Casado, J. M., & Sanjuán, M. A. (2011). **Map-based models in neuronal dynamics**. *Physics Reports*, 501(1-2), 1-74.
+
+- Ionides, E. L., Bretó, C., & King, A. A. (2006). **Inference for nonlinear dynamical systems**. *Proceedings of the National Academy of Sciences*, 103(49), 18438–18443.
+
+- Lindner, B., García-Ojalvo, J., Neiman, A., & Schimansky-Geier, L. (2004). **Effects of noise in excitable systems**. *Physics Reports*, 392(6), 321-424.
+
+- Ott, E. (2002). **Chaos in Dynamical Systems** (2nd ed.). *Cambridge University Press*.  
+
+- Pikovsky, A. S., & Kurths, J. (1997). **Coherence resonance in a noise-driven excitable system**. *Physical Review Letters*, 78(5), 775-778.
+
+- Rulkov, N. F. (2001). **Regularization of synchronized chaotic bursts**. *Physical Review Letters*, 86(1), 183-186.
+
+- Rulkov, N. F. (2002). **Modeling of spiking-bursting neural behavior using two-dimensional map**. Physical Review E, 65(4), 041922.
+
+- Shilnikov, A. L., & Rulkov, N. F. (2003). **Origin of chaos in a two-dimensional map modeling spiking-bursting neural activity**. *International Journal of Bifurcation and Chaos*, 13(11), 3325-3340.
+
+- Schuster, H.G. (1988). **Deterministic Chaos: An Introduction**. *Physik-Verlag*.
+
+- Strogatz, S. H. (1994). **Nonlinear dynamics and chaos: With applications to physics, biology, chemistry, and engineering**. *Addison-Wesley*.
+
+- Wood, S. N. (2010). **Statistical inference for noisy nonlinear ecological dynamic systems**. *Nature*, 466(7310), 1102-1104.
+
+
+
+
+ 
+
+
+
