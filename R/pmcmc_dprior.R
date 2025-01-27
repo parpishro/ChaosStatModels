@@ -15,8 +15,8 @@
 library(pomp)
 pmcmc_dprior <- Csnippet("
   if (
-    logsigma >= (log(0.01) - 10) && logsigma <= 10 &&  // Restrict logsigma
-    logeta >= (log(0.01) - 10) && logeta <= 10 &&      // Restrict logeta
+    logsigma >= (log(0.01) - 2) && logsigma <= 2 &&  // Restrict logsigma
+    logeta >= (log(0.01) - 2) && logeta <= 2 &&      // Restrict logeta
     alpha > 0 && alpha <= 10                           // Restrict alpha
   ) {
     lik = 0;  // Log-probability = 0 for uniform distribution within bounds
