@@ -1,64 +1,52 @@
-# ChaosStatModels
+# Inference on Non-linear Chaotic Dynamical Systems
 
-These two papers should be read together. They argue that the usual way to perform inference for 
-dynamic systems when they are "almost chaotic" may intrinsically be unreliable, and propose 
-synthetic likelihood as a feasible alternative.
+This repository contains the implementation and analysis of two statistical inference methods applied to the fast subsystem of the stochastic Rulkov map, a model for neuronal spiking and bursting behavior. The project evaluates the **Synthetic Likelihood (SL)** method and **Particle Markov Chain Monte Carlo (PMCMC)** to assess their performance in parameter estimation under chaotic dynamics and noise.
 
-### 1. **Introduction**
-   - Topic: Inferential Methods for Highly Nonlinear State Space Models in Ecology and Epidemiology
-   - Importance: challenges in statistical inference due to the chaotic or near-chaotic dynamics
-   - Objective: Comparison of two main classes of methods (information reduction and state-space 
-   methods) to handle these systems
+## File Structure
 
-### 2. **Background and Motivation**
-   - Context: Nonlinear dynamics in ecology and epidemiology (e.g., pest species, infectious diseases).
-   - Problem: Extreme sensitivity to small changes in system states and parameters
-   - Remedy: Two primary approaches:
-     - Information reduction methods (e.g., Approximate Bayesian Computation, Synthetic Likelihood)
-     - State-space methods (e.g., Particle Markov chain Monte Carlo, Iterated Filtering)
+- **`report.pdf`**: The detailed report analyzing the two methods, including results, methodology, and conclusions.
+- **`report.rmd`**: The detailed document and code scripts that create the report pdf. 
+- **`code/`**: Contains the implementation of the SL and PMCMC methods functions that are sourced in the report file.
+- **`data/`**: Pre-run results that are used in the report file to avoid long knitting times.
+- **`exp/`**: Number of few other experiments that I performed on this project.
+- **output_log.txt:** a log file to record the parameter estimates for the long code chunks (saved in data).
+- **`README.md`**: This file.
 
-### 3. **Methods Overview**
-   - **Information Reduction Methods:**
-     - Approximate Bayesian Computation (ABC): a computational method for Bayesian inference that 
-     estimates posterior distributions using simulated data and summary statistics, bypassing the 
-     need for explicit likelihood calculations
-     - Synthetic Likelihood (SL): a method for Bayesian inference that approximates the likelihood 
-     function by modeling the summary statistics of the data as a multivariate normal distribution, 
-     facilitating parameter estimation when the true likelihood is intractable
-   - **State-Space Methods:**
-     - Particle Markov chain Monte Carlo (PMCMC): Particle Markov Chain Monte Carlo (PMCMC) is a 
-     Bayesian inference method that combines particle filtering with MCMC to estimate posterior 
-     distributions in state-space models, enabling inference in complex, time-varying systems where 
-     standard MCMC would be inefficient or unfeasible
-     - Iterated Filtering (IF): Iterated Filtering (IF) is a method for maximum likelihood 
-     estimation in state-space models, where parameter estimates are iteratively updated using a 
-     particle filter to maximize the likelihood by progressively narrowing down the parameter space
-     - Parameter Cascading: a hierarchical estimation method where parameters are estimated in 
-     stages, using estimates from earlier stages to inform subsequent ones, reducing computational 
-     complexity and improving efficiency in multi-level or complex models
+## Summary of Results
 
-### 4. **Challenges in Nonlinear State Space Models**
-   - Multimodality in the parameter space: Small changes in parameters can lead to drastically 
-   different outcomes due to the system's sensitivity, resulting in multiple distinct regions in the
-   parameter space where the likelihood is high
-   - Particle filters with low process noise fail: Particles, which represent possible states of the
-   system, tend to collapse to a few high-likelihood values, causing a loss of diversity. This 
-   occurs because, with low process noise, the model becomes overly deterministic, and small 
-   inaccuracies in state estimation are not corrected, leading most particles to have negligible 
-   weights. As a result, the filter suffers from particle degeneracy, where only a few particles 
-   contribute to the estimate, degrading performance and preventing accurate tr
-.
+1. **Accuracy**:
+   - SL showed better accuracy for key parameters like α, especially under low noise conditions.
+   - PMCMC performed slightly better in estimating noise parameters (η and σ).
 
-### 5. **Comparative Analysis**
-   - Results from the simulations and real-world (e.g., Blowflies data, Cholera Epidemics) 
-   applications confirms
-   - The performance of each method is measured using:
-     - Error metrics, e.g., Mean Squared Error
-     - Computational efficiency and convergence issues
+2. **Computational Cost**:
+   - SL is more computationally efficient than PMCMC, making it suitable for preliminary analyses.
+   - PMCMC is more computationally intensive but can offer refined inferences.
 
-### 6. **Discussion**
-   - Neither method is universally superior
-   - Discuss practical implications for researchers in ecology and epidemiology.
-   - Use information reduction methods for model development and checking
-   - Switch to state-space methods for final inference
+3. **Noise Sensitivity**:
+   - SL is more robust in low-noise settings.
+   - PMCMC is better suited for high-noise scenarios.
+
+## Key Figures and Tables
+
+- **Parameter Estimation**: Neither SL or PMCMC outperforms universally (see Table 1 in the report).
+- **Log-likelihood Surface**: Demonstrates the challenges of chaotic inference (Figure 5 and 6).
+- **Computation Time**: PMCMC requires significantly more computational resources (Figure 9).
+
+## How to Run
+
+1. Clone the repository.
+
+2. Source the R file from R directory in the report Rmd file (this step is already done if you respect the current file structure).
+
+3. Source the pre-run models from data directory in the Rmd file (this step is already done if you respect the current file structure).
+
+4. Alternatively, set all eval=FALSE in the chunk headers to TRUE (four chunks) to run the models all over again. 
+Note that in this case the Rmd file will take hours to generate the pdf but the progress can be tracked using the output_log file)
+
+5. Knit the report rmd file to generate the pdf report with all the results.
+
+## Citation
+
+If you use this project, please cite:
+> Pishrobat, Par. "Inference on Non-linear Chaotic Dynamical Systems: Implementation and Evaluation of Woods (2010) and Fasiolo et al. (2016) Methodology." January 27, 2025.
 
