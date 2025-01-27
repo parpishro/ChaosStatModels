@@ -35,49 +35,61 @@
 #' @importFrom moments skewness kurtosis
 #' @export
 sl_stats <- function(x, extraArgs, ...) {
-  if (!is.matrix(x)) {
-    x <- matrix(x, 1, length(x))  # Ensure input is a matrix
-  }
+  if (!is.matrix(x)) 
+    x  <- matrix(x, 1, length(x))  # Ensure input is a matrix
+  
   tx <- t(x)
   S  <- cbind(
-    rowMeans(x),
-    apply(x, 1, sd),  # Standard deviation
-    #apply(x, 1, moments::skewness),  # Skewness
-    #apply(x, 1, moments::kurtosis),  # Kurtosis
-    #t(nlar(t(x), lag = c(6, 6, 6, 1, 1), power = c(1, 2, 3, 1, 2))),  # Nonlinear autoregressive features
+    t(nlar(tx, lag = c(6, 6, 6, 1, 1), power = c(1, 2, 3, 1, 2))),  # Nonlinear autoregressive features
+    rowMeans(x), 
     rowMeans(x) - apply(x, 1, median),  # Mean and mean-median difference
-    t(slAcf(t(x), max.lag = 11)), # Autocorrelation features
-    apply(t(abs(apply(sign(apply(x, 1, diff)), 2, diff))), 1, sum) / 2, # Count of zero crossings
-    # apply(x, 1, function(row) {
-    #   distances <- dist(row)
-    #   sum(distances < 0.1) / length(distances)  # Recurrence density
-    # }),
-    apply(x, 1, function(row) {
-      ps <- abs(fft(row))^2  # Power spectrum
-      sum(ps[2:6]) / sum(ps)  # Proportion of power in low-frequency bands
-    }),
-    #apply(x, 1, function(row) sum(diff(sign(diff(row))) != 0)), # Turning points
-    # apply(x, 1, function(row) { #  Inter-spike interval (example: mean interval above a chosen threshold)
-    #   threshold <- 0.5  # or any suitable value
-    #   spikeInds <- which(row > threshold)
-    #   if (length(spikeInds) < 2) return(NA_real_)
-    #   intervals <- diff(spikeInds)
-    #   mean(intervals)
-    # }),
-    # apply(x, 1, function(row) { # Bursting proportion (fraction of samples above a threshold)
-    #   threshold <- 0.5
-    #   mean(row > threshold)
-    # }),
-    t(apply(x, 1, function(row) { #Partial autocorrelation at lags up to 5
-      pac <- pacf(row, lag.max = 5, plot = FALSE)$acf
-      c(pac[1], pac[2])
-    })),
-    logitLowFreq = apply(x, 1, function(row) { #Logit transform of the low-frequency power ratio (improves normality)
-      ps <- abs(fft(row))^2
-      ratio <- sum(ps[2:6]) / sum(ps)
-      # Simple logit transform; watch out for ratio near 0 or 1
-      log(ratio / (1 - ratio))
-    })
-  )
+    t(slAcf(tx, max.lag = 11)),  # Autocorrelation features
+    apply(t(abs(apply(sign(apply(x, 1, diff)), 2, diff))), 1, sum)/2 # Count of zero crossings
+  )  
+  
   return(S)
 }
+
+#   tx <- t(x)
+#   S  <- cbind(
+#     rowMeans(x),
+#     apply(x, 1, sd),  # Standard deviation
+#     #apply(x, 1, moments::skewness),  # Skewness
+#     #apply(x, 1, moments::kurtosis),  # Kurtosis
+#     #t(nlar(t(x), lag = c(6, 6, 6, 1, 1), power = c(1, 2, 3, 1, 2))),  # Nonlinear autoregressive features
+#     rowMeans(x) - apply(x, 1, median),  # Mean and mean-median difference
+#     t(slAcf(tx, max.lag = 11)), # Autocorrelation features
+#     apply(t(abs(apply(sign(apply(x, 1, diff)), 2, diff))), 1, sum) / 2, # Count of zero crossings
+#     # apply(x, 1, function(row) {
+#     #   distances <- dist(row)
+#     #   sum(distances < 0.1) / length(distances)  # Recurrence density
+#     # }),
+#     apply(x, 1, function(row) {
+#       ps <- abs(fft(row))^2  # Power spectrum
+#       sum(ps[2:6]) / sum(ps)  # Proportion of power in low-frequency bands
+#     }),
+#     #apply(x, 1, function(row) sum(diff(sign(diff(row))) != 0)), # Turning points
+#     # apply(x, 1, function(row) { #  Inter-spike interval (example: mean interval above a chosen threshold)
+#     #   threshold <- 0.5  # or any suitable value
+#     #   spikeInds <- which(row > threshold)
+#     #   if (length(spikeInds) < 2) return(NA_real_)
+#     #   intervals <- diff(spikeInds)
+#     #   mean(intervals)
+#     # }),
+#     # apply(x, 1, function(row) { # Bursting proportion (fraction of samples above a threshold)
+#     #   threshold <- 0.5
+#     #   mean(row > threshold)
+#     # }),
+#     t(apply(x, 1, function(row) { #Partial autocorrelation at lags up to 5
+#       pac <- pacf(row, lag.max = 5, plot = FALSE)$acf
+#       c(pac[1], pac[2])
+#     })),
+#     logitLowFreq = apply(x, 1, function(row) { #Logit transform of the low-frequency power ratio (improves normality)
+#       ps <- abs(fft(row))^2
+#       ratio <- sum(ps[2:6]) / sum(ps)
+#       # Simple logit transform; watch out for ratio near 0 or 1
+#       log(ratio / (1 - ratio))
+#     })
+#   )
+#   return(S)
+# }
